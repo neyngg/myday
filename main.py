@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+
 import aiosqlite
 import uvicorn
 from aiogram import Bot, Dispatcher
@@ -621,5 +622,9 @@ async def index():
     return FileResponse("static/index.html")
 
 
+import os
+import uvicorn
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
