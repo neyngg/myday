@@ -24,7 +24,7 @@ from pydantic import BaseModel
 
 # Токен берётся из переменной окружения BOT_TOKEN (не храните его в коде)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8698693284:AAG0QfNmJUGA89ELYukCEE1198Yb0UtGe6s")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://nick-daily-tracker-99.serveousercontent.com")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://myday-1mw4.onrender.com")
 if not BOT_TOKEN:
     raise SystemExit("Задайте переменную окружения BOT_TOKEN")
 REPORTS_DIR = Path("reports")
