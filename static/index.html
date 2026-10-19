@@ -1,0 +1,1749 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Daily Focus</title>
+    <!-- Telegram WebApp SDK -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #f7f0dd;
+            --card: rgba(255, 255, 255, 0.55);
+            --ink: #1a1a1a;
+            --ink-2: rgba(26, 26, 26, 0.55);
+            --line: rgba(26, 26, 26, 0.1);
+            --yellow: #f4de7b;
+            --green: #9dbd7e;
+            --pink: #f4b9db;
+            --blue: #b7cdf3;
+            --danger: #e0475b;
+            --cream: #f7f0dd;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            font-family: 'Manrope', -apple-system, BlinkMacSystemFont, "SF Pro Display", Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--ink);
+            min-height: 100vh;
+            padding: 20px 16px 120px;
+            overflow-x: hidden;
+        }
+
+        button, input, select { font-family: inherit; }
+
+        /* Шапка */
+        .header { margin-bottom: 22px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+        .header h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.8px; }
+        .header p { font-size: 14px; color: var(--ink-2); margin-top: 2px; text-transform: capitalize; }
+
+        .round-btn {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            border: 1.5px dashed rgba(26, 26, 26, 0.4);
+            background: transparent;
+            color: var(--ink);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            flex-shrink: 0;
+            transition: all 0.2s;
+        }
+
+        .round-btn.active { background: var(--ink); border: 1.5px solid var(--ink); color: var(--cream); }
+        .ico { width: 22px; height: 22px; }
+
+        .tab-content { display: none; animation: fadeIn 0.25s ease forwards; }
+        .tab-content.active { display: block; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .glass-panel {
+            background: var(--card);
+            border-radius: 28px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .glass-input {
+            flex: 1;
+            width: 100%;
+            background: rgba(255, 255, 255, 0.75);
+            border: 1.5px solid var(--line);
+            border-radius: 16px;
+            padding: 13px 16px;
+            color: var(--ink);
+            font-size: 15px;
+            outline: none;
+            transition: all 0.2s;
+            color-scheme: light;
+        }
+
+        .glass-input::placeholder { color: var(--ink-2); }
+        .glass-input:focus { border-color: var(--ink); }
+
+        .date-field { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--ink-2); font-weight: 500; }
+
+        .btn-priority {
+            background: rgba(255, 255, 255, 0.75);
+            border: 1.5px solid var(--line);
+            border-radius: 999px;
+            padding: 10px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--ink);
+            cursor: pointer;
+            transition: 0.2s;
+        }
+
+        .btn-priority.active { background: var(--yellow); border-color: var(--ink); }
+
+        .glass-btn {
+            background: var(--ink);
+            border: none;
+            border-radius: 999px;
+            padding: 0 22px;
+            color: var(--cream);
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.15s, opacity 0.15s;
+        }
+
+        .glass-btn:active { transform: scale(0.96); }
+
+        .ghost-btn {
+            background: rgba(255, 255, 255, 0.75);
+            border: 1.5px solid var(--line);
+            border-radius: 999px;
+            padding: 0 18px;
+            color: var(--ink);
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.15s;
+        }
+
+        .ghost-btn:active { transform: scale(0.96); }
+
+        .task-list, .habit-list, .goal-list { display: flex; flex-direction: column; gap: 10px; }
+
+        .task-item, .habit-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: rgba(255, 255, 255, 0.7);
+            border-radius: 20px;
+            padding: 14px 16px;
+            transition: all 0.2s ease;
+        }
+
+        .task-item.priority-true { background: var(--yellow); }
+        .task-item.completed { opacity: 0.5; }
+        .task-item.completed .task-text { text-decoration: line-through; }
+
+        .task-left { display: flex; align-items: center; gap: 14px; flex: 1; cursor: pointer; }
+
+        .checkbox {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            border: 2px solid var(--ink);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            flex-shrink: 0;
+        }
+
+        .checkbox.checked { background: var(--ink); }
+        .checkbox.checked::after { content: "✓"; color: var(--cream); font-size: 13px; font-weight: bold; }
+
+        .task-body { display: flex; flex-direction: column; gap: 3px; flex: 1; }
+        .task-text { font-size: 15px; font-weight: 500; word-break: break-word; flex: 1; }
+        .task-meta { font-size: 12px; color: var(--ink-2); }
+        .task-meta.overdue { color: var(--danger); font-weight: 600; }
+
+        .btn-delete {
+            background: none;
+            border: none;
+            color: var(--ink-2);
+            cursor: pointer;
+            font-size: 15px;
+            padding: 6px;
+            border-radius: 8px;
+            transition: color 0.2s;
+        }
+
+        .btn-delete:hover { color: var(--danger); }
+
+        .empty-hint { text-align: center; color: var(--ink-2); font-size: 14px; padding: 24px 0; }
+
+        /* Главная */
+        .ring-wrap { position: relative; width: 260px; height: 260px; margin: 0 auto 8px; }
+        .ring-wrap svg { width: 100%; height: 100%; }
+
+        .ring-center {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 0 60px;
+        }
+
+        .ring-num { font-size: 60px; font-weight: 700; letter-spacing: -2px; line-height: 1; }
+        .ring-label { font-size: 13px; color: var(--ink-2); margin-top: 6px; }
+
+        .assist-card { background: var(--pink); border-radius: 26px; padding: 16px 18px; margin: 16px 0 22px; }
+        .assist-label { font-size: 11px; color: rgba(26, 26, 26, 0.6); margin-bottom: 8px; font-weight: 500; }
+        .assist-text { font-size: 15px; font-weight: 500; line-height: 1.45; margin-bottom: 14px; }
+        .assist-card .glass-btn { padding: 9px 18px; font-size: 13px; }
+
+        .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+        .section-head h2 { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+        .section-head .glass-btn { padding: 7px 16px; font-size: 13px; }
+
+        /* Цели */
+        .goal-item {
+            background: rgba(255, 255, 255, 0.7);
+            border-radius: 22px;
+            padding: 14px 16px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .goal-item:active { transform: scale(0.98); }
+        .goal-item.done { background: rgba(157, 189, 126, 0.4); }
+
+        .goal-top { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+
+        .goal-emoji {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: var(--yellow);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            flex-shrink: 0;
+        }
+
+        .goal-title { flex: 1; font-size: 15px; font-weight: 600; word-break: break-word; }
+
+        .goal-pct {
+            background: var(--ink);
+            color: var(--cream);
+            font-size: 13px;
+            font-weight: 700;
+            padding: 5px 12px;
+            border-radius: 999px;
+        }
+
+        .progress { height: 10px; border-radius: 99px; background: rgba(26, 26, 26, 0.08); overflow: hidden; }
+        .progress > div { height: 100%; border-radius: inherit; background: var(--yellow); transition: width 0.4s ease; }
+        .goal-item.done .progress > div { background: var(--green); }
+        .goal-values { margin-top: 8px; font-size: 13px; color: var(--ink-2); }
+
+        /* Календарь */
+        .calendar-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 14px;
+            font-weight: 700;
+            font-size: 17px;
+        }
+
+        .cal-nav {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.75);
+            border: 1.5px solid var(--line);
+            color: var(--ink);
+            font-size: 16px;
+            cursor: pointer;
+        }
+
+        .cal-nav:active { transform: scale(0.92); }
+
+        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; text-align: center; }
+        .cal-day-name { font-size: 12px; color: var(--ink-2); padding-bottom: 6px; font-weight: 500; }
+
+        .cal-cell {
+            background: rgba(255, 255, 255, 0.7);
+            border: 1.5px solid transparent;
+            border-radius: 14px;
+            padding: 6px 0 4px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+            min-height: 46px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 2px;
+        }
+
+        .cal-cell .cal-emoji { font-size: 12px; line-height: 1; min-height: 12px; }
+        .cal-cell.today { border-color: var(--ink); font-weight: 700; }
+        .cal-cell.has-event { font-weight: 600; }
+
+        .calendar-info {
+            margin-top: 14px;
+            font-size: 13px;
+            font-weight: 500;
+            text-align: center;
+            background: var(--yellow);
+            padding: 10px;
+            border-radius: 999px;
+            min-height: 38px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Модальные окна */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(26, 26, 26, 0.45);
+            display: none;
+            align-items: flex-end;
+            justify-content: center;
+            z-index: 200;
+            padding: 16px;
+        }
+
+        .modal-overlay.open { display: flex; }
+
+        .modal {
+            width: 100%;
+            max-width: 480px;
+            max-height: 85vh;
+            overflow-y: auto;
+            background: #fbf5e6;
+            border-radius: 30px;
+            padding: 20px;
+            animation: fadeIn 0.25s ease forwards;
+        }
+
+        .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+        .modal-title { font-size: 20px; font-weight: 700; letter-spacing: -0.4px; text-transform: capitalize; }
+        .modal-label { font-size: 12px; color: var(--ink-2); margin: 14px 0 8px; font-weight: 500; }
+        .modal-row { display: flex; gap: 10px; }
+        .modal-row .glass-input { flex: 1; }
+        input[type="time"].glass-input { flex: 0 0 120px; }
+
+        .swatches, .emoji-row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+        .swatch {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: 2.5px solid transparent;
+            cursor: pointer;
+            transition: transform 0.15s;
+        }
+
+        .swatch.selected { border-color: var(--ink); transform: scale(1.12); }
+
+        .emoji-btn {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.75);
+            border: 1.5px solid var(--line);
+            font-size: 18px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+
+        .emoji-btn.selected { background: var(--yellow); border-color: var(--ink); }
+
+        .modal-save { width: 100%; padding: 15px; margin-top: 18px; }
+        .goal-actions { display: flex; gap: 8px; margin-top: 12px; }
+        .goal-actions button { flex: 1; padding: 13px 0; }
+
+        .event-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
+
+        .event-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: rgba(255, 255, 255, 0.75);
+            border-left: 5px solid var(--ink);
+            border-radius: 16px;
+            padding: 10px 12px;
+        }
+
+        .event-time { font-size: 12px; color: var(--ink-2); min-width: 40px; }
+
+        /* Нижняя панель */
+        .tab-bar {
+            position: fixed;
+            bottom: 16px;
+            left: 16px;
+            right: 16px;
+            height: 66px;
+            background: var(--ink);
+            border-radius: 33px;
+            display: grid;
+            grid-template-columns: 1fr 1fr 84px 1fr 1fr;
+            align-items: center;
+            padding: 0 8px;
+            box-shadow: 0 10px 30px rgba(26, 26, 26, 0.25);
+            z-index: 100;
+        }
+
+        .tab-btn {
+            background: none;
+            border: none;
+            color: rgba(247, 240, 221, 0.45);
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+
+        .tab-btn::after { content: ""; width: 18px; height: 2px; border-radius: 2px; background: transparent; }
+        .tab-btn.active { color: var(--cream); }
+        .tab-btn.active::after { background: var(--cream); }
+
+        .plus-btn {
+            width: 62px;
+            height: 62px;
+            margin: -26px auto 0;
+            border-radius: 50%;
+            background: var(--pink);
+            color: var(--ink);
+            border: 4px solid var(--bg);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: transform 0.15s;
+        }
+
+        .plus-btn:active { transform: scale(0.92); }
+        .plus-btn .ico { width: 26px; height: 26px; }
+
+        /* ===== BOTANICAL SOFT PRODUCTIVITY ===== */
+:root{--bg:#F7F2E5;--card:#FFFCF5;--surface:#E9E4D7;--green:#87976F;--green-d:#667750;--ink:#302920;--ink-2:#81796B;--line:#E2DACA;--pink:#F2BBDD;--pink-l:#F8D9EB;--green-l:#DCE4C6;--sand:#CDB98F;--yellow:#DCE4C6;--blue:#E9E4D7;--danger:#A8493A;--cream:#F7F2E5;--dark:#302920;--sh:0 1px 2px rgba(48,41,32,.04),0 6px 16px rgba(48,41,32,.06)}
+body{background:var(--bg);padding:calc(20px + env(safe-area-inset-top)) 20px calc(128px + env(safe-area-inset-bottom));font-size:15px}
+#plants{opacity:.9}
+.header h1{font-size:28px;letter-spacing:-.6px;font-weight:800}
+.header p{color:var(--ink-2)}
+.round-btn{width:48px;height:48px;border:1px solid var(--line);background:var(--card);box-shadow:var(--sh)}
+.round-btn.active{background:var(--green-d);border-color:var(--green-d);color:#fff}
+.ico{width:22px;height:22px}
+.glass-panel{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:16px;box-shadow:var(--sh);-webkit-backdrop-filter:none;backdrop-filter:none}
+.glass-input{background:var(--card);border:1px solid var(--line);border-radius:16px;min-height:48px;box-shadow:none}
+.glass-input:focus{border-color:var(--green-d);box-shadow:0 0 0 3px var(--green-l)}
+.glass-btn{background:var(--green-d);color:#fff;min-height:44px;box-shadow:none;border-radius:16px}
+.glass-btn:active{transform:scale(.97);box-shadow:none}
+.ghost-btn,.btn-priority,.emoji-btn,.cal-nav{background:var(--card);border:1px solid var(--line);box-shadow:none;min-height:44px;color:var(--ink)}
+.ghost-btn{border-radius:16px}
+.cal-nav,.emoji-btn{min-width:44px}
+.btn-priority.active,.emoji-btn.selected{background:var(--pink-l);border-color:var(--pink);box-shadow:none}
+.modal-save{min-height:52px;border-radius:18px}
+.link-btn{background:none;border:0;color:var(--green-d);font-weight:700;font-size:14px;min-height:44px;padding:0 4px;cursor:pointer}
+.section-head{margin:22px 0 8px}
+.section-head h2{font-size:20px;font-weight:800;letter-spacing:-.3px}
+.task-list,.habit-list,.goal-list{gap:10px}
+.task-item,.habit-item,.goal-item,.event-item{background:var(--card);border:1px solid var(--line);box-shadow:none;border-radius:18px;padding:12px 14px;min-height:60px}
+.task-item.priority-true{background:var(--card);border-left:4px solid var(--pink)}
+.task-item.completed{background:var(--surface);opacity:.7;box-shadow:none}
+.task-left{min-height:44px}
+.checkbox{width:26px;height:26px;background:var(--card);border:2px solid var(--green);box-shadow:none}
+.checkbox.checked{background:var(--green-d);border-color:var(--green-d);box-shadow:none}
+.checkbox.checked::after{content:"";width:10px;height:5px;border:solid #fff;border-width:0 0 2px 2px;transform:rotate(-45deg) translate(1px,-1px)}
+.task-text{font-weight:600}.task-meta{font-size:13px}
+.task-meta.overdue{color:var(--danger)}
+.chip{display:inline-block;font-size:12px;font-weight:700;padding:2px 8px;border-radius:99px;background:var(--pink-l);color:var(--ink);margin-right:6px;vertical-align:1px}
+.btn-delete{min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;color:var(--ink-2)}
+.btn-delete svg{width:19px;height:19px}
+.empty-hint{padding:20px 8px;line-height:1.5}
+.empty-card{text-align:center;background:var(--card);border:1px dashed var(--line);border-radius:18px;padding:22px 16px;color:var(--ink-2);font-size:14px;line-height:1.5}
+.empty-card .glass-btn{margin-top:12px;padding:0 20px}
+.ring-wrap{width:240px;height:240px;margin:4px auto 16px}
+.ring-wrap svg{filter:none}
+.ring-num{font-weight:800}
+.next-event{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-radius:20px;padding:12px 14px;box-shadow:var(--sh)}
+.ne-ico{width:44px;height:44px;border-radius:50%;background:var(--pink-l);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
+.ne-t{font-weight:700;font-size:15px;word-break:break-word}.ne-s{font-size:13px;color:var(--ink-2)}
+.act-card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:16px;box-shadow:var(--sh)}
+.act-stats{display:flex;gap:24px;margin-bottom:12px}
+.act-stats b{display:block;font-size:24px;font-weight:800;letter-spacing:-.5px}.act-stats span{font-size:13px;color:var(--ink-2)}
+.bars{display:flex;align-items:flex-end;gap:6px;height:84px}
+.bar{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;background:none;border:0;cursor:pointer;gap:4px;color:var(--ink-2);font-size:12px}
+.bar i{display:block;width:100%;max-width:28px;border-radius:8px;background:var(--green);opacity:.55;min-height:4px}
+.bar.today i{background:var(--green-d);opacity:1}.bar.sel{color:var(--ink);font-weight:700}
+.act-tip{margin-top:10px;font-size:13px;color:var(--ink-2);min-height:18px}
+.goal-emoji{background:var(--green-l);box-shadow:none}
+.goal-pct{background:var(--green-d);box-shadow:none}
+.goal-item.done{background:var(--green-l)}
+.progress{background:var(--surface);box-shadow:none;height:8px}
+.progress>div,.goal-item.done .progress>div{background:var(--green);box-shadow:none}
+.goal-item.done .progress>div{background:var(--green-d)}
+.cal-cell{background:var(--card);border:1px solid var(--line);box-shadow:none;min-height:48px}
+.cal-cell.today{border:2px solid var(--green-d);box-shadow:none}
+.calendar-info{background:var(--green-l);box-shadow:none;border-radius:16px}
+.event-item{border-left-width:4px}
+.modal{background:var(--card);border-radius:24px 24px 0 0;box-shadow:0 -8px 30px rgba(48,41,32,.18);padding:20px 20px calc(20px + env(safe-area-inset-bottom))}
+.modal-overlay{padding:0;background:rgba(48,41,32,.4)}
+.swatch{box-shadow:none;width:36px;height:36px}.swatch.selected{border-color:var(--ink)}
+.menu-item{display:flex;align-items:center;gap:14px;width:100%;min-height:56px;background:var(--bg);border:1px solid var(--line);border-radius:18px;padding:0 16px;margin-top:10px;font-size:16px;font-weight:600;color:var(--ink);cursor:pointer}
+.menu-item .ico{color:var(--green-d)}
+.tab-bar{background:var(--dark);bottom:calc(14px + env(safe-area-inset-bottom));left:20px;right:20px;height:68px;border-radius:34px;box-shadow:0 10px 24px rgba(48,41,32,.22)}
+.tab-btn{color:rgba(247,242,229,.55);min-width:44px}
+.tab-btn.active{color:var(--cream)}.tab-btn.active::after{background:var(--pink);width:16px}
+.plus-btn{background:var(--pink);color:var(--ink);box-shadow:0 8px 18px rgba(242,187,221,.5);border:4px solid var(--bg)}
+:focus-visible{outline:2px solid var(--green-d);outline-offset:2px}
+@media(max-width:350px){.tab-bar{left:12px;right:12px;grid-template-columns:1fr 1fr 70px 1fr 1fr}.ring-wrap{width:210px;height:210px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* ===== layout fix + smart tasks + report ===== */
+html{background:var(--bg);min-height:100%}
+body{max-width:480px;margin:0 auto;min-height:100vh;min-height:100dvh;padding:20px 20px calc(120px + env(safe-area-inset-bottom))}
+#plants{position:fixed;top:0;left:0;width:100vw;height:100vh;height:100lvh;min-height:100%;z-index:-1}
+.tab-bar{left:50%;right:auto;width:min(calc(100% - 40px),440px);transform:translateX(-50%)}
+.modal-overlay.open{align-items:flex-end}
+.modal{max-height:90vh;max-height:90dvh;overflow-y:auto}
+.seg{display:flex;background:var(--surface);border-radius:16px;padding:4px;gap:4px;margin:14px 0 10px}
+.seg button{flex:1;min-height:40px;border:0;background:none;border-radius:12px;font-weight:700;font-size:14px;color:var(--ink-2);cursor:pointer}
+.seg button.on{background:var(--card);color:var(--ink);box-shadow:var(--sh)}
+.filters{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;flex:1}
+.cb{min-height:36px;padding:0 12px;border-radius:99px;border:1px solid var(--line);background:var(--card);font-size:13px;font-weight:600;color:var(--ink);cursor:pointer}
+.cb.on{background:var(--green-l);border-color:var(--green)}
+.sortsel{flex:0 0 auto;width:auto;min-height:40px;padding:0 8px;font-size:13px}
+.quick{display:flex;gap:8px}
+.qbtn{width:48px;min-height:48px;padding:0;display:flex;align-items:center;justify-content:center}
+.warn-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--pink-l);border-radius:16px;padding:6px 6px 6px 14px;margin-bottom:12px;font-size:14px;font-weight:700}
+.task-item.overdue{border-left:4px solid var(--danger)}
+.chk-hit{min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;margin:-8px 0 -8px -10px;cursor:pointer;flex-shrink:0}
+.task-left{gap:4px;cursor:default}.task-body{cursor:pointer;min-height:44px;justify-content:center}
+.progress.mini{height:5px;margin-top:6px}
+.chip.ok{background:var(--green-l)}.chip.bad{background:#F1D3CB;color:var(--danger)}
+.kv{margin:10px 0}.kv div{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
+.kv dt{color:var(--ink-2)}.kv dd{font-weight:600;text-align:right;word-break:break-word}
+.note{background:var(--bg);border-radius:14px;padding:10px 12px;font-size:14px;line-height:1.45;margin-top:10px;white-space:pre-wrap;word-break:break-word}
+.sub{display:flex;align-items:center;gap:6px;min-height:44px}.sub span{flex:1;word-break:break-word;font-size:15px}.sub .sdone{text-decoration:line-through;color:var(--ink-2)}
+.subs{margin:6px 0 10px}
+.move-row{display:none;gap:8px;margin-top:10px}.move-row.open{display:flex}.move-row .glass-btn{padding:0 18px}
+textarea.glass-input{min-height:72px;resize:vertical}
+details summary{min-height:44px;display:flex;align-items:center;font-weight:700;color:var(--green-d);cursor:pointer;margin-top:8px}
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:6px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:14px}
+.tile b{display:block;font-size:26px;font-weight:800;letter-spacing:-.5px}.tile span{font-size:13px;color:var(--ink-2)}
+.rep-card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:16px;box-shadow:var(--sh)}
+.rep-top{display:flex;justify-content:space-between;align-items:center;margin-top:-6px}
+.rows div{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line);font-size:15px}.rows div:last-child{border:0}.rows b{font-weight:800}
+.bars.dense{gap:2px}
+.heat{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.hd{font-size:12px;color:var(--ink-2);text-align:center}
+.hc{aspect-ratio:1;min-height:32px;border:0;border-radius:8px;background:var(--surface);font-size:11px;color:var(--ink);cursor:pointer}
+.hc.l1{background:#E4EAD3}.hc.l2{background:var(--green-l)}.hc.l3{background:#B7C39B}.hc.l4{background:var(--green);color:#fff}
+.cat{margin:10px 0}.cat div:first-child{display:flex;justify-content:space-between;font-size:14px;margin-bottom:4px}
+.toast{position:fixed;left:50%;bottom:calc(100px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--dark);color:var(--cream);padding:12px 16px;border-radius:14px;font-size:14px;max-width:calc(100% - 40px);word-break:break-all;opacity:0;pointer-events:none;transition:opacity .2s;z-index:300}
+.toast.on{opacity:1}
+/* ===== фон-сцены, покачивание, полупрозрачные карточки ===== */
+:root{--card:rgba(255,252,245,.8)}
+#plants{position:fixed;top:0;left:0;width:100%;height:100%;height:100lvh;z-index:-1;opacity:1;pointer-events:none}
+.scene{opacity:0;transition:opacity .8s ease}
+.scene.on{opacity:.4}
+.scene:not(.on) *{animation-play-state:paused!important}
+.sw,.swb{transform-box:fill-box;animation:sway ease-in-out infinite alternate}
+.sw{transform-origin:50% 100%}.swb{transform-origin:0 0}
+@keyframes sway{from{transform:rotate(calc(var(--a) * -1))}to{transform:rotate(var(--a))}}
+.glass-panel,.task-item,.goal-item,.habit-item,.act-card,.rep-card,.tile,.next-event,.empty-card{-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+.modal,.menu-item,.seg button.on{background:#FFFCF5}
+.modal{-webkit-backdrop-filter:none;backdrop-filter:none}
+/* фон на весь экран с запасом за краями */
+#plants{position:fixed;top:-48px;left:0;width:100%;height:calc(100vh + 96px);height:calc(100lvh + 96px);z-index:-1;pointer-events:none}
+.scene.on{opacity:.36}
+body{background:transparent!important}
+.header p{text-transform:none}.header p::first-letter{text-transform:uppercase}
+
+/* ===== удобство на телефоне: без авто-зума, фон скроллится со страницей ===== */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+*{touch-action:manipulation}
+input,select,textarea,.glass-input,.sortsel{font-size:16px!important}
+input[type="date"].glass-input,input[type="time"].glass-input{min-width:0;-webkit-appearance:none;appearance:none}
+.modal{overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+body{position:relative}
+#plants{position:absolute;top:0;left:0;width:100%;height:100%;z-index:-1;pointer-events:none;overflow:hidden}
+.scene.on{opacity:.28}
+</style>
+</head>
+<body>
+
+    <!-- Растительный фон -->
+    <svg id="plants" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs id="plDefs"></defs><g class="scene" data-s="leaves"></g><g class="scene" data-s="flowers"></g><g class="scene" data-s="sprouts"></g><g class="scene" data-s="trees"></g><g class="scene" data-s="meadow"></g><g class="scene" data-s="reeds"></g></svg>
+
+
+    <div class="header">
+        <div>
+            <h1 id="pageTitle">Главная</h1>
+            <p id="pageSubtitle"></p>
+        </div>
+        <button class="round-btn" id="calBtn" onclick="go('focus')" title="Календарь">
+            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="4"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>
+        </button>
+    </div>
+
+    <!-- Главная -->
+    <div id="tab-home" class="tab-content active">
+        <div class="ring-wrap" id="ringWrap"></div>
+        <div class="next-event" id="nextEvent"></div>
+        <div class="section-head">
+            <h2>Задачи на сегодня</h2>
+            <button class="link-btn" onclick="go('tasks')">Все задачи</button>
+        </div>
+        <div id="homeTasks" class="task-list"></div>
+        <div class="section-head"><h2>Цели</h2><button class="link-btn" onclick="go('goals')">Все цели</button></div>
+        <div id="homeGoals" class="goal-list"></div>
+        <div class="section-head"><h2>Отчёт по активности</h2><button class="link-btn" onclick="go('report')" aria-label="Подробный отчёт">Подробнее ›</button></div>
+        <div class="act-card" id="homeAct"></div>
+    </div>
+
+    <!-- Задачи -->
+    <div id="tab-tasks" class="tab-content">
+        <div class="quick">
+            <input type="text" id="quickInput" class="glass-input" placeholder="Новая задача…" onkeydown="if(event.key === 'Enter') quickAdd()">
+            <button class="glass-btn qbtn" onclick="quickAdd()" title="Добавить" aria-label="Добавить"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+        </div>
+        <div class="seg" id="scopeSeg"></div>
+        <div class="filters">
+            <div class="chips" id="prioChips"></div>
+            <select id="sortSel" class="glass-input sortsel" onchange="applyTasks()" aria-label="Сортировка">
+                <option value="default">Порядок</option><option value="prio">По приоритету</option><option value="due">По сроку</option><option value="name">По названию</option>
+            </select>
+        </div>
+        <div id="overdueBar"></div>
+        <div id="taskList" class="task-list"><div class="empty-hint">Загрузка задач...</div></div>
+    </div>
+
+    <!-- Отчёт -->
+    <div id="tab-report" class="tab-content">
+        <div class="rep-top">
+            <button class="link-btn" onclick="go('home')">‹ Назад</button>
+            <button class="link-btn" onclick="exportReport()">Сохранить отчёт</button>
+        </div>
+        <div class="seg" id="periodSeg"></div>
+        <div class="modal-row" id="customRange" style="display:none;margin-bottom:12px">
+            <label class="date-field">С<input type="date" id="repFrom" class="glass-input" onchange="renderReport()"></label>
+            <label class="date-field">По<input type="date" id="repTo" class="glass-input" onchange="renderReport()"></label>
+        </div>
+        <div id="reportBody"></div>
+    </div>
+
+    <!-- Привычки -->
+    <div id="tab-habits" class="tab-content">
+        <div class="glass-panel">
+            <div id="habitList" class="habit-list">
+                <div class="empty-hint">Загрузка привычек...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Цели -->
+    <div id="tab-goals" class="tab-content">
+        <div class="glass-panel">
+            <div id="goalList" class="goal-list">
+                <div class="empty-hint">Загрузка целей...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Календарь -->
+    <div id="tab-focus" class="tab-content">
+        <div class="glass-panel">
+            <div class="calendar-header">
+                <button class="cal-nav" onclick="changeMonth(-1)">‹</button>
+                <span id="monthYearLabel">Месяц Год</span>
+                <button class="cal-nav" onclick="changeMonth(1)">›</button>
+            </div>
+            <div class="calendar-grid" id="calendarGrid"></div>
+            <div class="calendar-info" id="calendarInfo">Нажми на день, чтобы добавить событие</div>
+        </div>
+    </div>
+
+    <!-- Окно события -->
+    <div class="modal-overlay" id="eventModal" onclick="if(event.target === this) closeModal()">
+        <div class="modal">
+            <div class="modal-head">
+                <span class="modal-title" id="modalDate"></span>
+                <button class="btn-delete" onclick="closeModal()" title="Закрыть">✕</button>
+            </div>
+            <div class="event-list" id="eventList"></div>
+            <div class="modal-label">Новое событие</div>
+            <div class="modal-row">
+                <input type="text" id="eventTitle" class="glass-input" placeholder="Что планируется?" onkeydown="if(event.key === 'Enter') submitEvent()">
+                <input type="time" id="eventTime" class="glass-input">
+            </div>
+            <div class="modal-label">Цвет</div>
+            <div class="swatches" id="swatches"></div>
+            <div class="modal-label">Эмодзи</div>
+            <div class="emoji-row" id="emojiRow"></div>
+            <button class="glass-btn modal-save" onclick="submitEvent()">Добавить событие</button>
+        </div>
+    </div>
+
+    <!-- Окно задачи: создание / редактирование -->
+    <div class="modal-overlay" id="newTaskModal" onclick="if(event.target === this) closeNewTask()">
+        <div class="modal">
+            <div class="modal-head">
+                <span class="modal-title" id="tfHead">Новая задача</span>
+                <button class="btn-delete" onclick="closeNewTask()" title="Закрыть" aria-label="Закрыть">✕</button>
+            </div>
+            <input type="text" id="taskInput" class="glass-input" placeholder="Название задачи" onkeydown="if(event.key === 'Enter') submitTask()">
+            <div class="modal-label">Приоритет</div>
+            <div class="seg" id="tfPrio" style="margin:0"></div>
+            <details>
+                <summary>Дополнительно</summary>
+                <div class="modal-label">Срок</div>
+                <div class="modal-row">
+                    <label class="date-field">С<input type="date" id="startInput" class="glass-input"></label>
+                    <label class="date-field">До<input type="date" id="untilInput" class="glass-input"></label>
+                </div>
+                <div class="modal-label">Время</div>
+                <input type="time" id="tfTime" class="glass-input" style="width:100%;flex:none">
+                <div class="modal-label">Напоминание в Telegram (нужно время)</div>
+                <select id="tfRemind" class="glass-input">
+                    <option value="">Нет</option><option value="0">В момент срока</option><option value="10">За 10 минут</option><option value="60">За час</option><option value="1440">За день</option>
+                </select>
+                <div class="modal-label">Повторение</div>
+                <select id="repeatSel" class="glass-input">
+                    <option value="none">Один раз</option><option value="daily">Ежедневно</option><option value="weekdays">По будням</option>
+                </select>
+                <div class="modal-label">Категория</div>
+                <input type="text" id="tfCat" class="glass-input" list="catList" placeholder="Например: Работа"><datalist id="catList"></datalist>
+                <div class="modal-label">Заметка</div>
+                <textarea id="tfNote" class="glass-input" placeholder="Необязательно"></textarea>
+                <div id="tfSubsWrap">
+                    <div class="modal-label">Подзадачи (по одной в строке)</div>
+                    <textarea id="tfSubs" class="glass-input"></textarea>
+                </div>
+            </details>
+            <button class="glass-btn modal-save" id="tfSave" onclick="submitTask()">Добавить задачу</button>
+        </div>
+    </div>
+
+    <!-- Карточка задачи -->
+    <div class="modal-overlay" id="taskModal" onclick="if(event.target === this) closeTask()">
+        <div class="modal" id="taskDetail"></div>
+    </div>
+    <div class="toast" id="toast" role="status"></div>
+
+    <!-- Окно новой привычки -->
+    <div class="modal-overlay" id="newHabitModal" onclick="if(event.target === this) closeNewHabit()">
+        <div class="modal">
+            <div class="modal-head">
+                <span class="modal-title">Новая привычка</span>
+                <button class="btn-delete" onclick="closeNewHabit()" title="Закрыть">✕</button>
+            </div>
+            <input type="text" id="habitInput" class="glass-input" placeholder="Название привычки..." onkeydown="if(event.key === 'Enter') submitHabit()">
+            <button class="glass-btn modal-save" onclick="submitHabit()">Добавить привычку</button>
+        </div>
+    </div>
+
+    <!-- Окно новой цели -->
+    <div class="modal-overlay" id="newGoalModal" onclick="if(event.target === this) closeNewGoal()">
+        <div class="modal">
+            <div class="modal-head">
+                <span class="modal-title">Новая цель</span>
+                <button class="btn-delete" onclick="closeNewGoal()" title="Закрыть">✕</button>
+            </div>
+            <input type="text" id="goalTitle" class="glass-input" placeholder="Например: Телефон">
+            <div class="modal-label">Сколько нужно набрать и в чём измеряем</div>
+            <div class="modal-row">
+                <input type="number" inputmode="decimal" step="any" id="goalTarget" class="glass-input" placeholder="Цель: 70000">
+                <input type="text" id="goalUnit" class="glass-input" placeholder="Ед.: ₽, поинты, км">
+            </div>
+            <div class="modal-label">Уже накоплено (необязательно)</div>
+            <input type="number" inputmode="decimal" step="any" id="goalStart" class="glass-input" placeholder="0">
+            <div class="modal-label">Эмодзи</div>
+            <div class="emoji-row" id="goalEmojiRow"></div>
+            <button class="glass-btn modal-save" onclick="submitGoal()">Создать цель</button>
+        </div>
+    </div>
+
+    <!-- Окно прогресса цели -->
+    <div class="modal-overlay" id="goalModal" onclick="if(event.target === this) closeGoalModal()">
+        <div class="modal">
+            <div class="modal-head">
+                <span class="modal-title" id="goalModalTitle"></span>
+                <button class="btn-delete" onclick="closeGoalModal()" title="Закрыть">✕</button>
+            </div>
+            <div class="progress"><div id="goalModalBar"></div></div>
+            <div class="goal-values" id="goalModalValues"></div>
+            <div class="modal-label">Сумма или количество поинтов</div>
+            <input type="number" inputmode="decimal" step="any" id="goalAmount" class="glass-input" placeholder="Например: 5000" onkeydown="if(event.key === 'Enter') updateGoal('add', 1)">
+            <div class="goal-actions">
+                <button class="glass-btn" onclick="updateGoal('add', 1)">＋ Добавить</button>
+                <button class="ghost-btn" onclick="updateGoal('add', -1)">− Убрать</button>
+                <button class="ghost-btn" onclick="updateGoal('set', 1)">= Задать</button>
+            </div>
+            <button class="ghost-btn modal-save" style="color: var(--danger);" onclick="deleteGoal()">Удалить цель</button>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="createMenu" onclick="if(event.target === this) closeMenu()">
+        <div class="modal">
+            <div class="modal-head"><span class="modal-title">Создать</span><button class="btn-delete" onclick="closeMenu()" title="Закрыть" aria-label="Закрыть">✕</button></div>
+            <button class="menu-item" onclick="pick('task')"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg>Задачу</button>
+            <button class="menu-item" onclick="pick('event')"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="4"/><path d="M3 10h18M8 2v4M16 2v4"/></svg>Событие</button>
+            <button class="menu-item" onclick="pick('habit')"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg>Привычку</button>
+            <button class="menu-item" onclick="pick('goal')"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/></svg>Цель</button>
+        </div>
+    </div>
+
+    <!-- Нижняя панель навигации -->
+    <div class="tab-bar">
+        <button class="tab-btn active" data-tab="home" onclick="go('home')" title="Главная">
+            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>
+        </button>
+        <button class="tab-btn" data-tab="focus" onclick="go('focus')" title="Календарь" aria-label="Календарь"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="4"/><path d="M3 10h18M8 2v4M16 2v4M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg></button>
+        <button class="plus-btn" onclick="onPlus()" title="Добавить">
+            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+        <button class="tab-btn" data-tab="habits" onclick="go('habits')" title="Привычки">
+            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg>
+        </button>
+        <button class="tab-btn" data-tab="goals" onclick="go('goals')" title="Цели">
+            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="0.8" fill="currentColor"/></svg>
+        </button>
+    </div>
+
+    <script>
+        let isPriority = false;
+        let currentTab = 'home';
+
+        if (window.Telegram && window.Telegram.WebApp) {
+            window.Telegram.WebApp.ready();
+            window.Telegram.WebApp.expand();
+            try { window.Telegram.WebApp.disableVerticalSwipes && window.Telegram.WebApp.disableVerticalSwipes(); } catch (e) {}
+        }
+
+        const pad = n => String(n).padStart(2, '0');
+        const dateKey = (y, m, d) => `${y}-${pad(m + 1)}-${pad(d)}`;
+        function todayStr() {
+            const n = new Date();
+            return dateKey(n.getFullYear(), n.getMonth(), n.getDate());
+        }
+
+        // --- НАВИГАЦИЯ ---
+        const TABS = {
+            home: ['Главная', () => new Date().toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' })],
+            tasks: ['Задачи', () => 'План на сегодня'],
+            habits: ['Привычки', () => 'Твой ритм и прогресс'],
+            goals: ['Цели', () => 'Шаг за шагом к большому'],
+            focus: ['Календарь', () => 'Планирование времени'],
+            report: ['Отчёт', () => 'Активность за период']
+        };
+
+        const THEME = { home: 'leaves', tasks: 'flowers', habits: 'sprouts', goals: 'trees', focus: 'meadow', report: 'reeds' };
+        function setTheme(t) {
+            document.querySelectorAll('#plants .scene').forEach(g => g.classList.toggle('on', g.dataset.s === THEME[t]));
+        }
+
+        function go(tabId) {
+            currentTab = tabId;
+            setTheme(tabId);
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.getElementById(`tab-${tabId}`).classList.add('active');
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.toggle('active', el.dataset.tab === tabId));
+            document.getElementById('calBtn').classList.toggle('active', tabId === 'focus');
+
+            document.getElementById('pageTitle').innerText = TABS[tabId][0];
+            document.getElementById('pageSubtitle').innerText = TABS[tabId][1]();
+
+            if (tabId === 'home') renderHome();
+            if (tabId === 'tasks') loadTasks();
+            if (tabId === 'report') renderReport();
+            if (tabId === 'goals') loadGoals();
+            if (tabId === 'focus') {
+                syncCalendarToToday();
+                renderCalendar();
+            }
+        }
+
+        // Центральная кнопка «+» зависит от открытой вкладки
+        function onPlus() { document.getElementById('createMenu').classList.add('open'); }
+        function closeMenu() { document.getElementById('createMenu').classList.remove('open'); }
+        function pick(kind) {
+            closeMenu();
+            ({ task: openNewTask, event: () => openModal(todayStr()), habit: openNewHabit, goal: openNewGoal })[kind]();
+        }
+
+        // --- ГЛАВНАЯ ---
+        const RING_COLORS = ['#87976F', '#B7C39B', '#F2BBDD', '#667750'];
+        const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>';
+
+        function ringSvg(pct) {
+            const r = 100, C = 2 * Math.PI * r, cap = 30, gap = 14;
+            const L = C / 4 - gap - cap;
+            const shift = (gap + cap) / 2 / C * 360;
+            let arcs = '';
+            for (let i = 0; i < 4; i++) {
+                const rot = `rotate(${-90 + i * 90 + shift} 130 130)`;
+                const f = Math.max(0, Math.min(1, (pct - i * 25) / 25));
+                arcs += `<circle cx="130" cy="130" r="${r}" fill="none" stroke="rgba(48,41,32,0.07)" stroke-width="30" stroke-linecap="round" stroke-dasharray="${L} ${C}" transform="${rot}"/>`;
+                if (f > 0) arcs += `<circle cx="130" cy="130" r="${r}" fill="none" stroke="${RING_COLORS[i]}" stroke-width="30" stroke-linecap="round" stroke-dasharray="${Math.max(f * L, 0.1)} ${C}" transform="${rot}"/>`;
+            }
+            return `<svg viewBox="0 0 260 260">${arcs}</svg>`;
+        }
+
+        async function renderHome() {
+            const today = todayStr();
+            let tasks = [], evs = [], gl = [];
+            try {
+                const [t, e, g] = await Promise.all([
+                    fetch(`/api/tasks?today=${today}`).then(r => r.json()),
+                    fetch(`/api/events?month=${today.slice(0, 7)}`).then(r => r.json()),
+                    fetch('/api/goals').then(r => r.json())
+                ]);
+                tasks = t.tasks; evs = e.events.filter(x => x.date === today); gl = g.goals;
+            } catch (err) {
+                console.error('Ошибка загрузки главной:', err);
+            }
+
+            cacheTasks(tasks);
+            const total = tasks.length;
+            const done = tasks.filter(t => t.completed).length;
+            const pct = total ? done / total * 100 : 0;
+            document.getElementById('ringWrap').innerHTML = ringSvg(pct) + `
+                <div class="ring-center">
+                    <div class="ring-num">${total ? done + '/' + total : '—'}</div>
+                    <div class="ring-label">${total ? 'задач выполнено сегодня' : 'на сегодня задач нет'}</div>
+                </div>`;
+
+            const now = pad(new Date().getHours()) + ':' + pad(new Date().getMinutes());
+            evs.sort((a, b) => (a.time || '99').localeCompare(b.time || '99'));
+            const ev = evs.find(e => e.time && e.time >= now) || evs[0];
+            document.getElementById('nextEvent').innerHTML = ev
+                ? `<span class="ne-ico">${ev.emoji}</span><div><div class="ne-t">${escapeHtml(ev.title)}</div><div class="ne-s">${ev.time || 'весь день'}${evs.length > 1 ? ' · ещё ' + (evs.length - 1) : ''}</div></div>`
+                : `<span class="ne-ico">🌿</span><div><div class="ne-t">Событий сегодня нет</div><div class="ne-s">Свободный день</div></div>`;
+
+            const box = document.getElementById('homeTasks');
+            box.innerHTML = '';
+            if (!total) {
+                box.innerHTML = '<div class="empty-card">На сегодня задач нет.<br>Добавьте первую — это займёт пару секунд.<br><button class="glass-btn" onclick="openNewTask()">Добавить задачу</button></div>';
+            } else {
+                const sorted = [...tasks].sort((a, b) => a.completed - b.completed);
+                sorted.slice(0, 5).forEach(t => box.appendChild(taskRow(t)));
+            }
+            goals = gl;
+            document.getElementById('homeGoals').innerHTML = gl.length
+                ? goalCards(gl.slice(0, 3))
+                : '<div class="empty-card">Целей пока нет.<br><button class="glass-btn" onclick="openNewGoal()">Создать цель</button></div>';
+            renderActivity();
+        }
+
+        // Отчёт за 7 дней: данные из /api/stats (история хранится в daily.db на вашем компьютере)
+        async function renderActivity() {
+            const box = $('homeAct');
+            const to = todayStr();
+            try {
+                const st = await api(`/api/stats?from=${addDays(to, -6)}&to=${to}&today=${to}`);
+                if (!st.planned && !st.done) {
+                    box.innerHTML = '<div class="empty-hint" style="padding:6px 0">За последние 7 дней данных нет. Отметьте задачу выполненной — график появится здесь.</div>';
+                    return;
+                }
+                const pct = st.planned ? Math.min(100, Math.round(st.done / st.planned * 100)) : 0;
+                const b = st.days.map(d => ({ done: d.done, today: d.date === to, lab: DAYS[(new Date(d.date + 'T00:00').getDay() + 6) % 7], tip: `${shortDate(d.date)}: выполнено ${d.done}` }));
+                box.innerHTML = `<div class="act-stats"><div><b>${st.done}</b><span>выполнено</span></div><div><b>${pct}%</b><span>от плана</span></div></div>${barsHtml(b)}<div class="act-tip" id="actTip">Нажмите на столбец, чтобы увидеть день</div>`;
+                bindBars(box, b, $('actTip'));
+            } catch (e) {
+                box.innerHTML = '<div class="empty-hint" style="padding:6px 0">Не удалось загрузить отчёт</div>';
+            }
+        }
+
+        // --- ЗАДАЧИ ---
+        const REPEAT_LABELS = { daily: '🔁 Ежедневно', weekdays: '🔁 По будням' };
+
+        function shortDate(key) {
+            const [y, m, d] = key.split('-').map(Number);
+            return new Date(y, m - 1, d).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+        }
+
+        const $ = id => document.getElementById(id);
+        const PRIO = { 1: 'Низкий', 2: 'Средний', 3: 'Высокий' };
+        const REMIND = { 0: 'В момент срока', 10: 'За 10 минут', 60: 'За час', 1440: 'За день' };
+        const REPEAT_NAMES = { none: 'Один раз', daily: 'Ежедневно', weekdays: 'По будням' };
+        const SCOPES = { today: 'Сегодня', week: 'Неделя', all: 'Все' };
+        let taskScope = 'today', taskPrio = 0, allTasks = [], taskCache = {}, openTaskId = null, editingId = null, formLevel = 2;
+
+        function cacheTasks(l) { l.forEach(t => taskCache[t.id] = t); }
+        function toast(msg) {
+            const t = $('toast'); t.textContent = msg; t.classList.add('on');
+            clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('on'), 2800);
+        }
+        async function api(url, method = 'GET', body) {
+            const r = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
+            if (!r.ok) throw new Error(r.status);
+            return r.json();
+        }
+        function addDays(k, n) {
+            const d = new Date(k + 'T00:00:00'); d.setDate(d.getDate() + n);
+            return dateKey(d.getFullYear(), d.getMonth(), d.getDate());
+        }
+
+        function buildToolbar() {
+            $('scopeSeg').innerHTML = Object.entries(SCOPES).map(([k, v]) => `<button class="${k === taskScope ? 'on' : ''}" onclick="setScope('${k}')">${v}</button>`).join('');
+            $('prioChips').innerHTML = [[0, 'Все'], [3, 'Высокий'], [2, 'Средний'], [1, 'Низкий']].map(([k, v]) => `<button class="cb ${k === taskPrio ? 'on' : ''}" onclick="setPrio(${k})">${v}</button>`).join('');
+        }
+        function setScope(k) { taskScope = k; loadTasks(); }
+        function setPrio(k) { taskPrio = k; buildToolbar(); applyTasks(); }
+
+        async function loadTasks() {
+            buildToolbar();
+            const list = $('taskList');
+            list.innerHTML = '<div class="empty-hint">Загрузка…</div>';
+            try {
+                const d = await api(`/api/tasks?today=${todayStr()}&scope=${taskScope}`);
+                allTasks = d.tasks; cacheTasks(allTasks); applyTasks();
+            } catch (err) {
+                list.innerHTML = '<div class="empty-card">Не удалось загрузить задачи.<br><button class="glass-btn" onclick="loadTasks()">Повторить</button></div>';
+            }
+        }
+
+        function applyTasks() {
+            const sort = $('sortSel').value;
+            let l = allTasks.filter(t => !taskPrio || t.level === taskPrio);
+            const by = {
+                prio: (a, b) => b.level - a.level,
+                due: (a, b) => ((a.until || '9') + (a.time || '')).localeCompare((b.until || '9') + (b.time || '')),
+                name: (a, b) => a.text.localeCompare(b.text, 'ru')
+            };
+            if (by[sort]) l = [...l].sort((a, b) => a.completed - b.completed || by[sort](a, b));
+            const od = allTasks.filter(t => t.overdue);
+            $('overdueBar').innerHTML = od.length ? `<div class="warn-bar"><span>Просрочено: ${od.length}</span><button class="link-btn" onclick="carryOver()">Перенести на сегодня</button></div>` : '';
+            const list = $('taskList'); list.innerHTML = '';
+            if (!l.length) {
+                list.innerHTML = allTasks.length
+                    ? '<div class="empty-card">Нет задач с таким фильтром.<br><button class="ghost-btn" style="min-height:44px;margin-top:12px" onclick="setPrio(0)">Сбросить фильтр</button></div>'
+                    : '<div class="empty-card">Здесь пока пусто.<br>Введите название выше — этого достаточно.</div>';
+                return;
+            }
+            l.forEach(t => list.appendChild(taskRow(t)));
+        }
+
+        function taskRow(t) {
+            const parts = [];
+            if (t.time) parts.push(t.time);
+            if (t.until) parts.push((t.overdue ? 'просрочено · ' : '') + 'до ' + shortDate(t.until));
+            if (t.repeat !== 'none') parts.push(REPEAT_NAMES[t.repeat]);
+            if (t.category) parts.push(escapeHtml(t.category));
+            const n = t.subs.length, dn = t.subs.filter(x => x.done).length;
+            if (n) parts.push(`${dn}/${n}`);
+            const item = document.createElement('div');
+            item.className = `task-item ${t.completed ? 'completed' : ''} ${t.overdue ? 'overdue' : ''} priority-${t.priority}`;
+            item.innerHTML = `
+                <div class="task-left">
+                    <div class="chk-hit" onclick="toggleTask(${t.id})" role="checkbox" aria-checked="${!!t.completed}" aria-label="Выполнено"><div class="checkbox ${t.completed ? 'checked' : ''}"></div></div>
+                    <div class="task-body" onclick="openTask(${t.id})">
+                        <span class="task-text">${t.priority ? '<span class="chip">Важно</span>' : ''}${escapeHtml(t.text)}</span>
+                        ${parts.length ? `<span class="task-meta ${t.overdue ? 'overdue' : ''}">${parts.join(' · ')}</span>` : ''}
+                        ${n ? `<div class="progress mini"><div style="width:${Math.round(dn / n * 100)}%"></div></div>` : ''}
+                    </div>
+                </div>`;
+            return item;
+        }
+
+        async function refreshTasks() {
+            taskCache = {};
+            if (currentTab === 'home') await renderHome();
+            else if (currentTab === 'tasks') await loadTasks();
+            if (openTaskId) renderTaskDetail();
+        }
+
+        async function toggleTask(id) {
+            try { await api(`/api/tasks/${id}/toggle?today=${todayStr()}`, 'POST'); await refreshTasks(); }
+            catch (e) { toast('Не удалось обновить задачу'); }
+        }
+
+        async function quickAdd() {
+            const i = $('quickInput'), text = i.value.trim();
+            if (!text) return;
+            try { await api('/api/tasks', 'POST', { text, repeat: 'none', level: 2 }); i.value = ''; await refreshTasks(); }
+            catch (e) { toast('Не удалось добавить задачу'); }
+        }
+
+        async function carryOver() {
+            const n = allTasks.filter(t => t.overdue).length;
+            if (!confirm(`Перенести просроченные задачи (${n}) на сегодня?`)) return;
+            try { await api(`/api/tasks/carry-over?today=${todayStr()}`, 'POST'); await refreshTasks(); toast('Задачи перенесены на сегодня'); }
+            catch (e) { toast('Не удалось перенести'); }
+        }
+
+        // --- форма задачи ---
+        function buildPrio() {
+            $('tfPrio').innerHTML = [1, 2, 3].map(k => `<button type="button" class="${k === formLevel ? 'on' : ''}" onclick="formLevel=${k}; buildPrio()">${PRIO[k]}</button>`).join('');
+        }
+        function openNewTask() { openTaskForm(null); }
+        function openTaskForm(t) {
+            editingId = t ? t.id : null;
+            formLevel = t ? t.level : 2;
+            buildPrio();
+            $('tfHead').textContent = t ? 'Изменить задачу' : 'Новая задача';
+            $('tfSave').textContent = t ? 'Сохранить' : 'Добавить задачу';
+            $('taskInput').value = t ? t.text : '';
+            $('startInput').value = t && t.start || '';
+            $('untilInput').value = t && t.until || '';
+            $('tfTime').value = t && t.time || '';
+            $('tfRemind').value = t && t.remind != null ? String(t.remind) : '';
+            $('repeatSel').value = t ? t.repeat : 'none';
+            $('tfCat').value = t ? t.category : '';
+            $('tfNote').value = t ? t.note : '';
+            $('tfSubs').value = '';
+            $('tfSubsWrap').style.display = t ? 'none' : '';
+            const cats = [...new Set(Object.values(taskCache).map(x => x.category).filter(Boolean))];
+            $('catList').innerHTML = cats.map(c => `<option value="${escapeHtml(c)}">`).join('');
+            $('newTaskModal').classList.add('open');
+            $('taskInput').focus();
+        }
+        function closeNewTask() { $('newTaskModal').classList.remove('open'); }
+
+        async function submitTask() {
+            const text = $('taskInput').value.trim();
+            if (!text) { toast('Введите название'); return; }
+            const time = $('tfTime').value || null, rem = $('tfRemind').value;
+            if (rem !== '' && !time) { toast('Для напоминания укажите время'); return; }
+            const body = {
+                text, level: formLevel, repeat: $('repeatSel').value,
+                start: $('startInput').value || null, until: $('untilInput').value || null,
+                time, remind: rem === '' ? null : Number(rem),
+                category: $('tfCat').value.trim(), note: $('tfNote').value.trim(),
+                subtasks: $('tfSubs').value.split('\n').map(x => x.trim()).filter(Boolean)
+            };
+            if (body.start && body.until && body.start > body.until) [body.start, body.until] = [body.until, body.start];
+            try {
+                if (editingId) await api(`/api/tasks/${editingId}`, 'PUT', body); else await api('/api/tasks', 'POST', body);
+                closeNewTask(); await refreshTasks();
+                toast(editingId ? 'Изменения сохранены' : 'Задача добавлена');
+            } catch (e) { toast('Не удалось сохранить задачу'); }
+        }
+
+        // --- карточка задачи ---
+        function openTask(id) { openTaskId = id; renderTaskDetail(); $('taskModal').classList.add('open'); }
+        function closeTask() { openTaskId = null; $('taskModal').classList.remove('open'); }
+
+        function renderTaskDetail() {
+            const t = taskCache[openTaskId];
+            if (!t) { closeTask(); return; }
+            const n = t.subs.length, dn = t.subs.filter(x => x.done).length;
+            const pct = n ? Math.round(dn / n * 100) : (t.completed ? 100 : 0);
+            const rows = [['Приоритет', PRIO[t.level]], t.until && ['Срок', shortDate(t.until)], t.time && ['Время', t.time],
+                t.remind != null && ['Напоминание', REMIND[t.remind] || ''], ['Повтор', REPEAT_NAMES[t.repeat]], t.category && ['Категория', t.category]].filter(Boolean);
+            const status = t.completed ? '<span class="chip ok">Выполнена</span>' : t.overdue ? '<span class="chip bad">Просрочена</span>' : '<span class="chip">В работе</span>';
+            $('taskDetail').innerHTML = `
+                <div class="modal-head"><span class="modal-title" style="text-transform:none;word-break:break-word">${escapeHtml(t.text)}</span><button class="btn-delete" onclick="closeTask()" aria-label="Закрыть">✕</button></div>
+                <div>${status}</div>
+                <dl class="kv">${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${escapeHtml(v)}</dd></div>`).join('')}</dl>
+                ${t.note ? `<p class="note">${escapeHtml(t.note)}</p>` : ''}
+                <div class="modal-label">Подзадачи${n ? ` · ${dn} из ${n}` : ''}</div>
+                <div class="progress"><div style="width:${pct}%"></div></div>
+                <div class="subs">${t.subs.map(x => `<div class="sub"><div class="chk-hit" onclick="toggleSub(${x.id})" role="checkbox" aria-checked="${x.done}"><div class="checkbox ${x.done ? 'checked' : ''}"></div></div><span class="${x.done ? 'sdone' : ''}">${escapeHtml(x.text)}</span><button class="btn-delete" onclick="delSub(${x.id})" aria-label="Удалить подзадачу">${TRASH}</button></div>`).join('')}</div>
+                <div class="modal-row"><input id="subInput" class="glass-input" placeholder="Новая подзадача" onkeydown="if(event.key === 'Enter') addSub()"><button class="glass-btn" style="padding:0 16px" onclick="addSub()">Добавить</button></div>
+                <div class="goal-actions"><button class="glass-btn" onclick="editTask()">Изменить</button><button class="ghost-btn" onclick="dupTask()">Дублировать</button><button class="ghost-btn" onclick="$('moveRow').classList.toggle('open')">Перенести</button></div>
+                <div class="move-row" id="moveRow"><input type="date" id="moveDate" class="glass-input" value="${todayStr()}"><button class="glass-btn" onclick="moveTask()">Готово</button></div>
+                <button class="ghost-btn modal-save" style="color:var(--danger)" onclick="deleteTask(${t.id})">Удалить задачу</button>`;
+        }
+
+        async function subCall(fn, err) {
+            try { await fn(); await refreshTasks(); } catch (e) { toast(err); }
+        }
+        async function addSub() {
+            const text = $('subInput').value.trim(); if (!text) return;
+            await subCall(() => api(`/api/tasks/${openTaskId}/subtasks`, 'POST', { text }), 'Не удалось добавить подзадачу');
+            const i = $('subInput'); if (i) i.focus();
+        }
+        const toggleSub = id => subCall(() => api(`/api/subtasks/${id}/toggle`, 'POST'), 'Не удалось обновить подзадачу');
+        const delSub = id => subCall(() => api(`/api/subtasks/${id}`, 'DELETE'), 'Не удалось удалить подзадачу');
+
+        function editTask() { const t = taskCache[openTaskId]; closeTask(); openTaskForm(t); }
+        async function dupTask() {
+            try { await api(`/api/tasks/${openTaskId}/duplicate`, 'POST'); closeTask(); await refreshTasks(); toast('Задача продублирована'); }
+            catch (e) { toast('Не удалось продублировать'); }
+        }
+        async function moveTask() {
+            const to = $('moveDate').value; if (!to) return;
+            try { await api(`/api/tasks/${openTaskId}/move`, 'POST', { to }); closeTask(); await refreshTasks(); toast('Перенесено на ' + shortDate(to)); }
+            catch (e) { toast('Не удалось перенести'); }
+        }
+        async function deleteTask(id) {
+            if (!confirm('Удалить задачу? История выполнения в отчётах сохранится.')) return;
+            try { await api(`/api/tasks/${id}`, 'DELETE'); closeTask(); await refreshTasks(); }
+            catch (e) { toast('Не удалось удалить задачу'); }
+        }
+
+        // --- графики ---
+        function barsHtml(b) {
+            const max = Math.max(1, ...b.map(x => x.done));
+            return `<div class="bars ${b.length > 14 ? 'dense' : ''}">${b.map((x, i) => `<button class="bar ${x.today ? 'today' : ''}" data-i="${i}" aria-label="${x.tip}"><i style="height:${Math.round(x.done / max * 56) + 4}px"></i>${b.length <= 14 ? x.lab : ''}</button>`).join('')}</div>`;
+        }
+        function bindBars(root, b, tip) {
+            root.querySelectorAll('.bar').forEach(el => el.onclick = () => {
+                root.querySelectorAll('.bar').forEach(x => x.classList.remove('sel'));
+                el.classList.add('sel'); tip.textContent = b[el.dataset.i].tip;
+            });
+        }
+
+        // --- подробный отчёт ---
+        let repPeriod = 'week', repData = null;
+        const PER = { week: ['Неделя', 7], month: ['Месяц', 30], d90: ['90 дней', 90], custom: ['Период', 0] };
+        function setPeriod(k) {
+            repPeriod = k;
+            if (k === 'custom' && !$('repFrom').value) { $('repTo').value = todayStr(); $('repFrom').value = addDays(todayStr(), -13); }
+            renderReport();
+        }
+        function repRange() {
+            const to = todayStr();
+            if (repPeriod === 'custom') return [$('repFrom').value || addDays(to, -6), $('repTo').value || to];
+            return [addDays(to, -(PER[repPeriod][1] - 1)), to];
+        }
+        async function renderReport() {
+            $('periodSeg').innerHTML = Object.entries(PER).map(([k, v]) => `<button class="${k === repPeriod ? 'on' : ''}" onclick="setPeriod('${k}')">${v[0]}</button>`).join('');
+            $('customRange').style.display = repPeriod === 'custom' ? 'flex' : 'none';
+            const [f, t] = repRange(), body = $('reportBody');
+            if (f > t) { body.innerHTML = '<div class="empty-card">Дата начала позже даты конца.</div>'; return; }
+            body.innerHTML = '<div class="empty-hint">Загрузка…</div>';
+            try { repData = await api(`/api/stats?from=${f}&to=${t}&today=${todayStr()}`); drawReport(); }
+            catch (e) { body.innerHTML = '<div class="empty-card">Не удалось построить отчёт (период — до 400 дней).<br><button class="glass-btn" onclick="renderReport()">Повторить</button></div>'; }
+        }
+        function weekStart(k) { return addDays(k, -((new Date(k + 'T00:00').getDay() + 6) % 7)); }
+        function bucketize(days) {
+            const n = days.length, today = todayStr();
+            if (n <= 31) return days.map(d => ({ done: d.done, today: d.date === today, lab: n <= 7 ? DAYS[(new Date(d.date + 'T00:00').getDay() + 6) % 7] : String(+d.date.slice(8)), tip: `${shortDate(d.date)}: выполнено ${d.done} из ${d.planned}` }));
+            const weekly = n <= 120, map = new Map();
+            days.forEach(d => {
+                const k = weekly ? weekStart(d.date) : d.date.slice(0, 7);
+                const x = map.get(k) || { done: 0, planned: 0, k };
+                x.done += d.done; x.planned += d.planned; map.set(k, x);
+            });
+            return [...map.values()].map(x => {
+                const name = weekly ? 'Неделя с ' + shortDate(x.k) : MONTHS[+x.k.slice(5) - 1];
+                return { done: x.done, today: false, lab: weekly ? String(+x.k.slice(8)) : MONTHS[+x.k.slice(5) - 1].slice(0, 3), tip: `${name}: выполнено ${x.done} из ${x.planned}` };
+            });
+        }
+        function drawReport() {
+            const st = repData, body = $('reportBody'), n = st.days.length;
+            if (!st.planned && !st.done) {
+                body.innerHTML = '<div class="empty-card">За этот период данных нет.<br>Статистика появится, когда задачи будут запланированы и отмечены.</div>'; return;
+            }
+            const pct = st.planned ? Math.min(100, Math.round(st.done / st.planned * 100)) : 0;
+            const unfinished = Math.max(0, st.planned - st.done);
+            const b = bucketize(st.days);
+            const max = Math.max(1, ...st.days.map(d => d.done));
+            let h = `<div class="tiles">
+                <div class="tile"><b>${st.done}</b><span>Выполнено</span></div>
+                <div class="tile"><b>${pct}%</b><span>Выполнение плана</span></div>
+                <div class="tile"><b>${(st.done / n).toFixed(1).replace('.', ',')}</b><span>Задач в день</span></div>
+                <div class="tile"><b>${st.active_days}<small style="font-size:15px;color:var(--ink-2)"> из ${n}</small></b><span>Активных дней</span></div></div>
+                <div class="section-head"><h2>Активность</h2></div>
+                <div class="rep-card" id="chartBox">${barsHtml(b)}<div class="act-tip" id="chartTip">Нажмите на столбец, чтобы увидеть подробности</div></div>
+                <div class="section-head"><h2>Выполнение задач</h2></div>
+                <div class="rep-card rows"><div><span>Запланировано</span><b>${st.planned}</b></div><div><span>Выполнено</span><b>${st.done}</b></div><div><span>Не завершено</span><b>${unfinished}</b></div><div><span>Просрочено сейчас</span><b>${st.overdue}</b></div></div>`;
+            if (n <= 120) {
+                const lead = (new Date(st.days[0].date + 'T00:00').getDay() + 6) % 7;
+                h += `<div class="section-head"><h2>Календарь активности</h2></div><div class="rep-card"><div class="heat">${DAYS.map(d => `<div class="hd">${d}</div>`).join('')}${'<div></div>'.repeat(lead)}${st.days.map(d => `<button class="hc l${d.done ? Math.ceil(d.done / max * 4) : 0}" data-d="${d.date}" aria-label="${shortDate(d.date)}: ${d.done}">${+d.date.slice(8)}</button>`).join('')}</div><div class="act-tip" id="heatTip">Чем темнее клетка, тем больше задач выполнено</div></div>`;
+            }
+            const named = st.categories.filter(c => c.name);
+            h += '<div class="section-head"><h2>Категории</h2></div><div class="rep-card">';
+            if (!named.length) h += '<div class="empty-hint" style="padding:4px 0">Категорий пока нет. Добавьте категорию при создании задачи — здесь появится распределение.</div>';
+            else {
+                const tot = st.categories.reduce((a, c) => a + c.done, 0);
+                h += st.categories.map(c => `<div class="cat"><div><span>${escapeHtml(c.name || 'Без категории')}</span><b>${c.done}</b></div><div class="progress"><div style="width:${Math.round(c.done / tot * 100)}%"></div></div></div>`).join('');
+            }
+            body.innerHTML = h + '</div>';
+            bindBars($('chartBox'), b, $('chartTip'));
+            body.querySelectorAll('.hc').forEach(el => el.onclick = () => {
+                const d = st.days.find(x => x.date === el.dataset.d);
+                $('heatTip').textContent = `${shortDate(d.date)}: выполнено ${d.done} из ${d.planned}`;
+            });
+        }
+        async function exportReport() {
+            const [f, t] = repRange();
+            try { const d = await api(`/api/stats/export?from=${f}&to=${t}&today=${todayStr()}`); toast('Сохранено: ' + d.path); }
+            catch (e) { toast('Не удалось сохранить отчёт'); }
+        }
+
+        // --- ПРИВЫЧКИ ---
+        async function loadHabits() {
+            try {
+                const res = await fetch('/api/habits');
+                const data = await res.json();
+                renderHabits(data.habits);
+            } catch (err) {
+                console.error('Ошибка загрузки привычек:', err);
+                document.getElementById('habitList').innerHTML = '<div class="empty-hint">Не удалось загрузить привычки</div>';
+            }
+        }
+
+        function renderHabits(habits) {
+            const list = document.getElementById('habitList');
+            list.innerHTML = '';
+
+            if (!habits || habits.length === 0) {
+                list.innerHTML = '<div class="empty-hint">Список привычек пуст</div>';
+                return;
+            }
+
+            habits.forEach(habit => {
+                const item = document.createElement('div');
+                item.className = 'habit-item';
+                item.innerHTML = `
+                    <span class="task-text">${escapeHtml(habit.text)}</span>
+                    <button class="btn-delete" onclick="deleteHabit(${habit.id})" title="Удалить" aria-label="Удалить">${TRASH}</button>
+                `;
+                list.appendChild(item);
+            });
+        }
+
+        function openNewHabit() {
+            document.getElementById('habitInput').value = '';
+            document.getElementById('newHabitModal').classList.add('open');
+            document.getElementById('habitInput').focus();
+        }
+
+        function closeNewHabit() { document.getElementById('newHabitModal').classList.remove('open'); }
+
+        async function submitHabit() {
+            const input = document.getElementById('habitInput');
+            const text = input.value.trim();
+            if (!text) return;
+
+            try {
+                await fetch('/api/habits', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text })
+                });
+                closeNewHabit();
+                await loadHabits();
+            } catch (err) {
+                console.error('Ошибка добавления привычки:', err);
+            }
+        }
+
+        async function deleteHabit(id) {
+            if (!confirm('Удалить привычку?')) return;
+            try {
+                await fetch(`/api/habits/${id}`, { method: 'DELETE' });
+                await loadHabits();
+            } catch (err) {
+                console.error('Ошибка удаления привычки:', err);
+            }
+        }
+
+        // --- ЦЕЛИ ---
+        const GOAL_EMOJIS = ['🎯', '📱', '💻', '🏠', '🚗', '✈️', '💰', '🎓', '📚', '🏋️'];
+        let goals = [];
+        let activeGoalId = null;
+        let goalEmoji = GOAL_EMOJIS[0];
+
+        const fmt = n => Number(n).toLocaleString('ru-RU', { maximumFractionDigits: 2 });
+        const goalPct = g => g.target > 0 ? Math.min(100, Math.round(g.current / g.target * 100)) : 0;
+        const goalText = g => `${fmt(g.current)} / ${fmt(g.target)}${g.unit ? ' ' + escapeHtml(g.unit) : ''}`;
+
+        function goalCards(list) {
+            return list.map(g => {
+                const done = g.current >= g.target;
+                return `
+                <div class="goal-item ${done ? 'done' : ''}" onclick="openGoal(${g.id})">
+                    <div class="goal-top">
+                        <span class="goal-emoji">${g.emoji}</span>
+                        <span class="goal-title">${escapeHtml(g.title)}</span>
+                        <span class="goal-pct">${done ? '🎉 ' : ''}${goalPct(g)}%</span>
+                    </div>
+                    <div class="progress"><div style="width:${goalPct(g)}%"></div></div>
+                    <div class="goal-values">${goalText(g)}</div>
+                </div>`;
+            }).join('');
+        }
+
+        async function loadGoals() {
+            try {
+                const res = await fetch('/api/goals');
+                const data = await res.json();
+                goals = data.goals;
+                renderGoals();
+            } catch (err) {
+                console.error('Ошибка загрузки целей:', err);
+                document.getElementById('goalList').innerHTML = '<div class="empty-hint">Не удалось загрузить цели</div>';
+            }
+        }
+
+        function renderGoals() {
+            const list = document.getElementById('goalList');
+            list.innerHTML = goals.length
+                ? goalCards(goals)
+                : '<div class="empty-hint">Целей пока нет. Нажмите «+», чтобы добавить первую</div>';
+        }
+
+        function openNewGoal() {
+            goalEmoji = GOAL_EMOJIS[0];
+            ['goalTitle', 'goalTarget', 'goalUnit', 'goalStart'].forEach(id => document.getElementById(id).value = '');
+            buildGoalEmojis();
+            document.getElementById('newGoalModal').classList.add('open');
+        }
+
+        function closeNewGoal() { document.getElementById('newGoalModal').classList.remove('open'); }
+
+        function buildGoalEmojis() {
+            document.getElementById('goalEmojiRow').innerHTML = GOAL_EMOJIS.map(e =>
+                `<button type="button" class="emoji-btn ${e === goalEmoji ? 'selected' : ''}" onclick="goalEmoji='${e}'; buildGoalEmojis()">${e}</button>`
+            ).join('');
+        }
+
+        async function refreshGoalViews() {
+            if (currentTab === 'home') await renderHome(); else await loadGoals();
+        }
+
+        async function submitGoal() {
+            const title = document.getElementById('goalTitle').value.trim();
+            const target = parseFloat(document.getElementById('goalTarget').value);
+            if (!title || !(target > 0)) return;
+            const unit = document.getElementById('goalUnit').value.trim();
+            const current = parseFloat(document.getElementById('goalStart').value) || 0;
+
+            try {
+                await fetch('/api/goals', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title, target, unit, emoji: goalEmoji, current })
+                });
+                closeNewGoal();
+                await refreshGoalViews();
+            } catch (err) {
+                console.error('Ошибка создания цели:', err);
+            }
+        }
+
+        function openGoal(id) {
+            activeGoalId = id;
+            document.getElementById('goalAmount').value = '';
+            fillGoalModal();
+            document.getElementById('goalModal').classList.add('open');
+        }
+
+        function fillGoalModal() {
+            const g = goals.find(x => x.id === activeGoalId);
+            if (!g) return;
+            document.getElementById('goalModalTitle').innerText = `${g.emoji} ${g.title}`;
+            document.getElementById('goalModalBar').style.width = goalPct(g) + '%';
+            document.getElementById('goalModalValues').innerHTML = `${goalText(g)} · ${goalPct(g)}%`;
+        }
+
+        function closeGoalModal() {
+            document.getElementById('goalModal').classList.remove('open');
+            activeGoalId = null;
+        }
+
+        async function updateGoal(mode, sign) {
+            const raw = parseFloat(document.getElementById('goalAmount').value);
+            if (isNaN(raw) || !activeGoalId) return;
+            try {
+                await fetch(`/api/goals/${activeGoalId}/progress`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode, value: raw * sign })
+                });
+                document.getElementById('goalAmount').value = '';
+                const res = await fetch('/api/goals');
+                goals = (await res.json()).goals;
+                fillGoalModal();
+                if (currentTab === 'goals') renderGoals(); else if (currentTab === 'home') renderHome();
+            } catch (err) {
+                console.error('Ошибка обновления цели:', err);
+            }
+        }
+
+        async function deleteGoal() {
+            if (!activeGoalId || !confirm('Удалить цель?')) return;
+            try {
+                await fetch(`/api/goals/${activeGoalId}`, { method: 'DELETE' });
+                closeGoalModal();
+                await refreshGoalViews();
+            } catch (err) {
+                console.error('Ошибка удаления цели:', err);
+            }
+        }
+
+        // --- КАЛЕНДАРЬ ---
+        const MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
+        const DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+        const COLORS = ['#87976F', '#F2BBDD', '#CDB98F', '#667750', '#B7C39B', '#C98FA8'];
+        const EMOJIS = ['📌', '🎯', '🎂', '💼', '🏋️', '✈️', '❤️', '📚', '🎉', '💊'];
+
+        const startNow = new Date();
+        let viewYear = startNow.getFullYear();
+        let viewMonth = startNow.getMonth();
+        let knownRealMonth = `${viewYear}-${viewMonth}`;
+        let eventsByDate = {};
+        let modalDateKey = null;
+        let pickedColor = COLORS[0];
+        let pickedEmoji = EMOJIS[0];
+
+        // Если наступил новый месяц, пока приложение было открыто, переключаемся на него
+        function syncCalendarToToday() {
+            const now = new Date();
+            const real = `${now.getFullYear()}-${now.getMonth()}`;
+            if (real !== knownRealMonth) {
+                knownRealMonth = real;
+                viewYear = now.getFullYear();
+                viewMonth = now.getMonth();
+            }
+        }
+
+        function changeMonth(delta) {
+            viewMonth += delta;
+            if (viewMonth < 0) { viewMonth = 11; viewYear--; }
+            if (viewMonth > 11) { viewMonth = 0; viewYear++; }
+            renderCalendar();
+        }
+
+        async function loadEvents() {
+            eventsByDate = {};
+            try {
+                const res = await fetch(`/api/events?month=${viewYear}-${pad(viewMonth + 1)}`);
+                const data = await res.json();
+                data.events.forEach(e => {
+                    (eventsByDate[e.date] = eventsByDate[e.date] || []).push(e);
+                });
+            } catch (err) {
+                console.error('Ошибка загрузки событий:', err);
+            }
+        }
+
+        async function renderCalendar() {
+            document.getElementById('monthYearLabel').innerText = `${MONTHS[viewMonth]} ${viewYear}`;
+            await loadEvents();
+
+            const todayKey = todayStr();
+            const firstDayIndex = new Date(viewYear, viewMonth, 1).getDay();
+            const adjustedFirstDay = firstDayIndex === 0 ? 6 : firstDayIndex - 1;
+            const totalDays = new Date(viewYear, viewMonth + 1, 0).getDate();
+
+            let html = DAYS.map(d => `<div class="cal-day-name">${d}</div>`).join('');
+            for (let i = 0; i < adjustedFirstDay; i++) html += '<div></div>';
+
+            for (let day = 1; day <= totalDays; day++) {
+                const key = dateKey(viewYear, viewMonth, day);
+                const evs = eventsByDate[key];
+                const last = evs ? evs[evs.length - 1] : null;
+                const style = last ? `style="border-color:${last.color};background:${last.color}40"` : '';
+                html += `<div class="cal-cell ${key === todayKey ? 'today' : ''} ${last ? 'has-event' : ''}" ${style} onclick="openModal('${key}')">
+                    <span>${day}</span><span class="cal-emoji">${last ? last.emoji : ''}</span>
+                </div>`;
+            }
+            document.getElementById('calendarGrid').innerHTML = html;
+        }
+
+        function buildPickers() {
+            document.getElementById('swatches').innerHTML = COLORS.map(c =>
+                `<div class="swatch ${c === pickedColor ? 'selected' : ''}" style="background:${c}" onclick="pickColor('${c}')"></div>`
+            ).join('');
+            document.getElementById('emojiRow').innerHTML = EMOJIS.map(e =>
+                `<button type="button" class="emoji-btn ${e === pickedEmoji ? 'selected' : ''}" onclick="pickEmoji('${e}')">${e}</button>`
+            ).join('');
+        }
+
+        function pickColor(c) { pickedColor = c; buildPickers(); }
+        function pickEmoji(e) { pickedEmoji = e; buildPickers(); }
+
+        async function openModal(key) {
+            modalDateKey = key;
+            const [y, m, d] = key.split('-').map(Number);
+            // Если «+» нажат на другой вкладке или в другом месяце, подгружаем события нужного месяца
+            if (currentTab !== 'focus' || y !== viewYear || m - 1 !== viewMonth) {
+                viewYear = y; viewMonth = m - 1;
+                await loadEvents();
+            }
+            const label = new Date(y, m - 1, d).toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+            document.getElementById('modalDate').innerText = label;
+            document.getElementById('eventTitle').value = '';
+            document.getElementById('eventTime').value = '';
+            pickedColor = COLORS[0];
+            pickedEmoji = EMOJIS[0];
+            buildPickers();
+            renderModalEvents();
+            document.getElementById('eventModal').classList.add('open');
+        }
+
+        function closeModal() {
+            document.getElementById('eventModal').classList.remove('open');
+            modalDateKey = null;
+        }
+
+        function renderModalEvents() {
+            const list = document.getElementById('eventList');
+            const evs = eventsByDate[modalDateKey] || [];
+            list.innerHTML = evs.map(e => `
+                <div class="event-item" style="border-left-color:${e.color}">
+                    <span>${e.emoji}</span>
+                    <span class="event-time">${e.time || ''}</span>
+                    <span class="task-text">${escapeHtml(e.title)}</span>
+                    <button class="btn-delete" onclick="deleteEvent(${e.id})" title="Удалить" aria-label="Удалить">${TRASH}</button>
+                </div>
+            `).join('');
+        }
+
+        async function submitEvent() {
+            const title = document.getElementById('eventTitle').value.trim();
+            if (!title || !modalDateKey) return;
+            const time = document.getElementById('eventTime').value || null;
+
+            try {
+                await fetch('/api/events', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ date: modalDateKey, title, time, color: pickedColor, emoji: pickedEmoji })
+                });
+                document.getElementById('eventTitle').value = '';
+                document.getElementById('eventTime').value = '';
+                await renderCalendar();
+                renderModalEvents();
+            } catch (err) {
+                console.error('Ошибка добавления события:', err);
+            }
+        }
+
+        async function deleteEvent(id) {
+            if (!confirm('Удалить событие?')) return;
+            try {
+                await fetch(`/api/events/${id}`, { method: 'DELETE' });
+                await renderCalendar();
+                renderModalEvents();
+            } catch (err) {
+                console.error('Ошибка удаления события:', err);
+            }
+        }
+
+        // Защита от XSS
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.innerText = text;
+            return div.innerHTML;
+        }
+
+        // При возврате в приложение обновляем открытую вкладку (новый день / новый месяц)
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) go(currentTab);
+        });
+
+        // --- ФОН: растения подгоняются под размер экрана и покрывают его целиком ---
+        const PL_DEFS = (() => {
+            const n = x => +x.toFixed(1);
+            const leaf = '<g id="leaf"><path d="M0 0C6-12 24-20 46-16C60-13 70-5 74 0C70 5 60 13 46 16C24 20 6 12 0 0Z" stroke-width="3" stroke-linejoin="round"/><path d="M6 0C30-2 50-1 66 0" fill="none" stroke="#F7F2E5" stroke-opacity=".6" stroke-width="1.2"/></g>';
+            const pt = '<path id="pt" d="M0 0C-12-4-13-24 0-30C13-24 12-4 0 0Z" stroke-width="2.5" stroke-linejoin="round"/>';
+            const P = [[0, 0], [80, -10], [150, 70]];
+            const at = t => [0, 1].map(k => (1 - t) ** 2 * P[0][k] + 2 * (1 - t) * t * P[1][k] + t * t * P[2][k]);
+            const ang = t => Math.atan2(2 * (1 - t) * (P[1][1] - P[0][1]) + 2 * t * (P[2][1] - P[1][1]), 2 * (1 - t) * (P[1][0] - P[0][0]) + 2 * t * (P[2][0] - P[1][0])) * 180 / Math.PI;
+            let br = '<g id="br"><path d="M0 0Q80 -10 150 70" fill="none" stroke-width="2.4" stroke-linecap="round"/>';
+            for (let i = 1; i <= 7; i++) {
+                const t = i / 8, [x, y] = at(t);
+                br += `<use href="#leaf" transform="translate(${n(x)} ${n(y)}) rotate(${n(ang(t) + (i % 2 ? -50 : 50))}) scale(${(0.95 - 0.5 * t).toFixed(2)})"/>`;
+            }
+            const [ex, ey] = at(1);
+            br += `<use href="#leaf" transform="translate(${n(ex)} ${n(ey)}) rotate(${n(ang(1))}) scale(.45)"/></g>`;
+            const ring = (cnt, col, sc) => Array.from({ length: cnt }, (_, i) => `<use href="#pt" transform="rotate(${n(i * 360 / cnt)}) scale(${sc})" fill="${col}" stroke="${col}"/>`).join('');
+            const fl = `<g id="fl"><path d="M0 0C-8-30 8-70 0-118" fill="none" stroke-width="2.4" stroke-linecap="round"/><use href="#leaf" transform="translate(-1 -38) rotate(-145) scale(.5)"/><use href="#leaf" transform="translate(2 -64) rotate(-35) scale(.42)"/><g transform="translate(0 -118)">${ring(7, '#F2BBDD', 1)}${ring(7, '#F8D9EB', .55)}<circle r="5.5" fill="#CDB98F" stroke="none"/></g></g>`;
+            const fl2 = `<g id="fl2"><path d="M0 0C8-30-8-64 0-108" fill="none" stroke-width="2.4" stroke-linecap="round"/><use href="#leaf" transform="translate(1 -34) rotate(-35) scale(.45)"/><g transform="translate(0 -108)">${ring(6, '#F8D9EB', .85)}${ring(6, '#F2BBDD', .42)}<circle r="4.5" fill="#CDB98F" stroke="none"/></g></g>`;
+            const tu = '<g id="tu"><path d="M0 0C6-26-6-60 0-96" fill="none" stroke-width="2.4" stroke-linecap="round"/><use href="#leaf" transform="translate(0 -30) rotate(-150) scale(.55)"/><use href="#leaf" transform="translate(1 -48) rotate(-30) scale(.45)"/><g transform="translate(0 -100)"><path d="M-13-24C-15-8-7 4 0 4C7 4 15-8 13-24C8-18 4-28 0-32C-4-28-8-18-13-24Z" fill="#F2BBDD" stroke="#F2BBDD" stroke-width="3" stroke-linejoin="round"/><path d="M0 4C-3-8-3-20 0-32C3-20 3-8 0 4Z" fill="#F8D9EB" stroke="none"/></g></g>';
+            const sp = '<g id="sp"><path d="M0 0C-2-14 2-26 0-40" fill="none" stroke-width="2.4" stroke-linecap="round"/><use href="#leaf" transform="translate(0 -24) rotate(-40) scale(.5)"/><use href="#leaf" transform="translate(0 -30) rotate(-140) scale(.45)"/><use href="#leaf" transform="translate(0 -40) rotate(-90) scale(.3)"/></g>';
+            const tr = '<g id="tr"><path d="M-6 0C-5-30-3-60-2-92L2-92C3-60 5-30 6 0Z" fill="#B3A079" stroke="none"/><path d="M0-60C-14-72-22-84-28-96M0-70C10-80 18-90 22-100" fill="none" stroke="#B3A079" stroke-width="3" stroke-linecap="round"/><g stroke="none"><circle cx="0" cy="-120" r="30"/><circle cx="-26" cy="-100" r="24"/><circle cx="26" cy="-102" r="25"/><circle cx="-14" cy="-140" r="22"/><circle cx="16" cy="-142" r="23"/><circle cx="0" cy="-100" r="26"/><circle cx="-10" cy="-130" r="16" fill="#DCE4C6" fill-opacity=".4"/><circle cx="14" cy="-112" r="12" fill="#DCE4C6" fill-opacity=".3"/></g></g>';
+            const pn = '<g id="pn"><rect x="-4" y="-40" width="8" height="40" rx="3" fill="#B3A079" stroke="none"/><g stroke-width="8" stroke-linejoin="round"><path d="M0-150L-30-102L30-102Z"/><path d="M0-125L-40-72L40-72Z"/><path d="M0-95L-50-40L50-40Z"/></g></g>';
+            const rd = '<g id="rd" stroke="none"><path d="M-3 0C-6-60-16-110-38-150C-14-112-2-60 4 0Z"/><path d="M0 0C-2-70 4-130 24-178C12-128 8-66 6 0Z"/><path d="M2 0C8-50 26-86 50-112C34-82 14-46 8 0Z"/></g>';
+            const ct = '<g id="ct"><path d="M0 0C-2-60 2-110 0-150" fill="none" stroke-width="2.2" stroke-linecap="round"/><ellipse cx="0" cy="-162" rx="6" ry="20" fill="#B3A079" stroke="none"/><path d="M-3 0C-8-40-20-70-40-96C-16-72-4-40 4 0Z" stroke="none"/></g>';
+            const berry = (x, y, r, c) => `<circle cx="${x}" cy="${y}" r="${r}" fill="${c}" stroke="none"/><circle cx="${n(x - r * .3)}" cy="${n(y - r * .35)}" r="${n(r * .28)}" fill="#fff" fill-opacity=".5" stroke="none"/>`;
+            const bush = (id, c) => `<g id="${id}"><path d="M0 0C-4-30 6-60 0-112" fill="none" stroke-width="2.4" stroke-linecap="round"/><path d="M1-58C14-68 27-70 35-62" fill="none" stroke-width="2" stroke-linecap="round"/><path d="M-1-84C-14-92-25-90-31-82" fill="none" stroke-width="2" stroke-linecap="round"/><use href="#leaf" transform="translate(-1 -26) rotate(-150) scale(.5)"/><use href="#leaf" transform="translate(2 -44) rotate(-30) scale(.45)"/><use href="#leaf" transform="translate(0 -70) rotate(-145) scale(.4)"/><use href="#leaf" transform="translate(0 -96) rotate(-35) scale(.34)"/>${berry(35, -54, 7, c)}${berry(-31, -74, 7, c)}${berry(0, -120, 7, c)}${berry(-8, -108, 6.5, c)}${berry(8, -107, 6.5, c)}</g>`;
+            const sprig = (id, c) => `<g id="${id}"><path d="M0 0C2-16-2-30 0-44" fill="none" stroke-width="2.2" stroke-linecap="round"/><path d="M0-28C10-32 18-28 22-20" fill="none" stroke-width="1.8" stroke-linecap="round"/><path d="M0-36C-10-40-18-36-22-28" fill="none" stroke-width="1.8" stroke-linecap="round"/><use href="#leaf" transform="translate(0 -14) rotate(-35) scale(.34)"/><use href="#leaf" transform="translate(0 -20) rotate(-145) scale(.3)"/>${berry(22, -13, 5.5, c)}${berry(-22, -21, 5.5, c)}${berry(0, -50, 5.5, c)}</g>`;
+            let bw = '<g id="bw"><path d="M0 0Q80 -10 150 70" fill="none" stroke-width="2.4" stroke-linecap="round"/>';
+            for (let i = 1; i <= 7; i++) {
+                const t = i / 8, [x, y] = at(t), a = ang(t);
+                if (i % 2) bw += `<use href="#leaf" transform="translate(${n(x)} ${n(y)}) rotate(${n(a + (i % 4 === 1 ? -50 : 50))}) scale(${(0.8 - 0.4 * t).toFixed(2)})"/>`;
+                else {
+                    const side = i % 4 === 2 ? 1 : -1, rad = (a + side * 90) * Math.PI / 180, bx = x + Math.cos(rad) * 16, by = y + Math.sin(rad) * 16;
+                    bw += `<path d="M${n(x)} ${n(y)}L${n(bx)} ${n(by)}" fill="none" stroke-width="1.8" stroke-linecap="round"/>` + berry(n(bx), n(by), 6.5, '#D488AE');
+                }
+            }
+            bw += '</g>';
+            return leaf + pt + br + fl + fl2 + tu + sp + tr + pn + rd + ct
+                + bush('bb', '#D488AE') + bush('bc', '#C96F6A') + bush('bd', '#7E7BA8')
+                + sprig('bs', '#D488AE') + sprig('bt', '#C96F6A') + bw;
+        })();
+        const PL_GREEN = ['#87976F', '#A7B58C', '#667750', '#B7C39B'];
+        const PL_SPEC = { br: { s: [.35, .55] }, fl: { s: [.55, .9] }, fl2: { s: [.55, .9] }, tu: { s: [.55, .9] }, sp: { s: [1.2, 1.9] }, tr: { s: [.5, .8], c: ['#87976F', '#A7B58C', '#667750'] }, pn: { s: [.5, .8], c: ['#667750', '#87976F'] }, rd: { s: [.5, .85] }, ct: { s: [.5, .8] }, bb: { s: [.6, .95] }, bc: { s: [.6, .95] }, bd: { s: [.6, .95] }, bs: { s: [.9, 1.4] }, bt: { s: [.9, 1.4] }, bw: { s: [.45, .7] } };
+        const PL_SCENES = { leaves: ['br', 'br', 'br', 'sp'], flowers: ['fl', 'fl2', 'tu', 'fl', 'sp'], sprouts: ['bb', 'bc', 'bd', 'bs', 'bt', 'bw'], trees: ['tr', 'pn', 'tr', 'pn', 'sp', 'rd'], meadow: ['fl', 'fl2', 'tu', 'rd', 'sp', 'ct'], reeds: ['rd', 'ct', 'rd', 'sp', 'rd'] };
+
+        function rng(seed) {
+            return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+        }
+
+        let plRows = 0, plKey = '';
+        function layoutPlants() {
+            const svg = $('plants'), W = svg.clientWidth;
+            if (!W) return;
+            const H = Math.max(svg.clientHeight, window.innerHeight);
+            const cols = Math.max(2, Math.round(W / 190)), cw = W / cols, ch = 210;
+            plRows = Math.max(plRows, Math.ceil(H / ch) + 1);
+            const key = W + 'x' + plRows;
+            if (key === plKey) return;
+            plKey = key;
+            $('plDefs').innerHTML = PL_DEFS;
+            const k = Math.min(1.15, Math.max(.85, W / 400));
+            Object.keys(PL_SCENES).forEach((name, si) => {
+                const list = PL_SCENES[name];
+                let h = '';
+                for (let rw = 0; rw < plRows; rw++) for (let c = 0; c < cols; c++) {
+                    const r = rng((si * 7919 + rw * 104729 + c * 1299709 + 11) | 0);
+                    if (r() < .35) continue; // пустые ячейки — воздух между растениями
+                    const sym = list[Math.floor(r() * list.length)], sp = PL_SPEC[sym], pal = sp.c || PL_GREEN;
+                    const sc = ((sp.s[0] + r() * (sp.s[1] - sp.s[0])) * k).toFixed(2), col = pal[Math.floor(r() * pal.length)];
+                    const x = Math.round((c + .5 + (r() - .5) * .24) * cw);
+                    const y = Math.round((sym === 'br' || sym === 'bw') ? (rw + .5) * ch + (r() - .5) * 20 : (rw + .88) * ch);
+                    const rot = (sym === 'br' || sym === 'bw') ? Math.round(r() * 360) : Math.round((r() - .5) * 20);
+                    const amp = (sym === 'tr' || sym === 'pn' ? .5 + r() : 1.2 + r() * 1.4).toFixed(1);
+                    h += `<g transform="translate(${x} ${y}) rotate(${rot}) scale(${sc})" opacity="${(.7 + r() * .3).toFixed(2)}"><g class="${(sym === 'br' || sym === 'bw') ? 'swb' : 'sw'}" style="--a:${amp}deg;animation-duration:${(4.5 + r() * 3.5).toFixed(1)}s;animation-delay:-${(r() * 8).toFixed(1)}s"><use href="#${sym}" fill="${col}" stroke="${col}"/></g></g>`;
+                }
+                svg.querySelector(`[data-s="${name}"]`).innerHTML = h;
+            });
+        }
+        let plTimer;
+        window.addEventListener('resize', () => { clearTimeout(plTimer); plTimer = setTimeout(layoutPlants, 200); });
+        if (window.Telegram && window.Telegram.WebApp && Telegram.WebApp.onEvent) Telegram.WebApp.onEvent('viewportChanged', () => { clearTimeout(plTimer); plTimer = setTimeout(layoutPlants, 200); });
+
+        if (window.ResizeObserver) new ResizeObserver(() => { clearTimeout(plTimer); plTimer = setTimeout(layoutPlants, 150); }).observe(document.body);
+        document.addEventListener('DOMContentLoaded', () => {
+            layoutPlants();
+            loadHabits();
+            go('home');
+        });
+    </script>
+</body>
+</html>
