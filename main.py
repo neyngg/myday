@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import html
 import os
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -9,6 +10,7 @@ from pathlib import Path
 import aiosqlite
 import uvicorn
 from aiogram import Bot, Dispatcher, F
+from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -106,7 +108,7 @@ async def init_db():
         await db.commit()
 
 
-# --- КЛАВИАТУРЫ ---
+# --- КЛАВИАТУРЫ И ЦЕНТРАЛЬНАЯ ЛОГИКА ---
 def main_menu_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -119,6 +121,24 @@ def main_menu_kb():
     )
 
 
+async def go_home(chat_id: int, state: FSMContext):
+    """Сбрасывает состояние, обновляет кнопку WebApp и показывает главное сообщение."""
+    await state.clear()
+
+    # Принудительно обновляем кнопку приложения для текущего чата
+    await bot.set_chat_menu_button(
+        chat_id=chat_id,
+        menu_button=MenuButtonWebApp(text="Трекер", web_app=WebAppInfo(url=WEBAPP_URL))
+    )
+
+    await bot.send_message(
+        chat_id=chat_id,
+        text="Что делаем дальше?👇",
+        reply_markup=main_menu_kb()
+    )
+
+
+# --- ФОРМАТИРОВАНИЕ КАРТОЧЕК (СОВРЕМЕННЫЙ HTML) ---
 async def get_task_text(task_id: int):
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
@@ -131,21 +151,24 @@ async def get_task_text(task_id: int):
     lvl_map = {1: "🟢 Низкий", 2: "🟡 Средний", 3: "🔴 Высокий"}
 
     lines = [
-        f"📝 *Задача:* {r['text']}",
-        f"Уровень: {lvl_map.get(r['level'], '🟡 Средний')}",
-        f"Повтор: {rep_map.get(r['repeat_type'], 'Один раз')}",
-        f"Срок: {r['until_date'] or 'Нет'}",
-        f"Время: {r['due_time'] or 'Нет'}",
+        "🌿 <b>Задача добавлена</b>\n",
+        "<blockquote>",
+        f"<b>Название:</b> {html.escape(r['text'])}",
+        f"<b>Уровень:</b> {lvl_map.get(r['level'], '🟡 Средний')}",
+        f"<b>Повтор:</b> {rep_map.get(r['repeat_type'], 'Один раз')}",
+        f"<b>Срок:</b> {r['until_date'] or 'Нет'}",
+        f"<b>Время:</b> {r['due_time'] or 'Нет'}"
     ]
-    if r['note']: lines.append(f"Заметка: _{r['note']}_")
-    if subs: lines.append("\nПодзадачи:\n" + "\n".join(f"▫️ {s['text']}" for s in subs))
+    if r['note']: lines.append(f"<b>Заметка:</b> <i>{html.escape(r['note'])}</i>")
+    lines.append("</blockquote>")
+    if subs: lines.append("\n<b>Подзадачи:</b>\n" + "\n".join(f"▫️ {html.escape(s['text'])}" for s in subs))
     return "\n".join(lines)
 
 
 def task_kb(task_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Уровень", callback_data=f"t_lvl:{task_id}"),
-         InlineKeyboardButton(text="Повтор", callback_data=f"t_rep:{task_id}")],
+        [InlineKeyboardButton(text="⚡️ Уровень", callback_data=f"t_lvl:{task_id}"),
+         InlineKeyboardButton(text="🔁 Повтор", callback_data=f"t_rep:{task_id}")],
         [InlineKeyboardButton(text="📅 Срок", callback_data=f"t_date:{task_id}"),
          InlineKeyboardButton(text="⏰ Время", callback_data=f"t_time:{task_id}")],
         [InlineKeyboardButton(text="➕ Подзадача", callback_data=f"t_sub:{task_id}"),
@@ -159,13 +182,20 @@ async def get_goal_text(goal_id: int):
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)) as cur: r = await cur.fetchone()
     if not r: return "Цель удалена"
-    return f"{r['emoji']} *Цель:* {r['title']}\nЗначение цели: {r['target']} {r['unit']}\nНакоплено: {r['current']} {r['unit']}"
+    return (
+        f"{r['emoji']} <b>Цель сохранена</b>\n\n"
+        f"<blockquote>"
+        f"<b>Название:</b> {html.escape(r['title'])}\n"
+        f"<b>Значение:</b> {r['target']} {html.escape(r['unit'])}\n"
+        f"<b>Накоплено:</b> {r['current']} {html.escape(r['unit'])}\n"
+        f"</blockquote>"
+    )
 
 
 def goal_kb(goal_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎯 Изменить значение", callback_data=f"g_tgt:{goal_id}")],
-        [InlineKeyboardButton(text="⚖️ Ед. измерения", callback_data=f"g_unt:{goal_id}")],
+        [InlineKeyboardButton(text="🎯 Значение цели", callback_data=f"g_tgt:{goal_id}"),
+         InlineKeyboardButton(text="⚖️ Ед. измерения", callback_data=f"g_unt:{goal_id}")],
         [InlineKeyboardButton(text="✅ Готово", callback_data="close_kb")]
     ])
 
@@ -175,7 +205,14 @@ async def get_event_text(event_id: int):
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM events WHERE id = ?", (event_id,)) as cur: r = await cur.fetchone()
     if not r: return "Событие удалено"
-    return f"{r['emoji']} *Событие:* {r['title']}\nДата: {r['date']}\nВремя: {r['time'] or 'Весь день'}"
+    return (
+        f"{r['emoji']} <b>Событие сохранено</b>\n\n"
+        f"<blockquote>"
+        f"<b>Название:</b> {html.escape(r['title'])}\n"
+        f"<b>Дата:</b> {r['date']}\n"
+        f"<b>Время:</b> {r['time'] or 'Весь день'}\n"
+        f"</blockquote>"
+    )
 
 
 def event_kb(event_id: int):
@@ -193,21 +230,18 @@ def habit_kb():
 # --- БОТ: ГЛАВНОЕ МЕНЮ И СОЗДАНИЕ ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('chat_id', ?)", (str(message.chat.id),))
         await db.commit()
-    await message.answer(
-        "Привет! Твой трекер обновлен.\nИспользуй кнопки ниже для быстрого управления своими делами ⬇️",
-        reply_markup=main_menu_kb()
-    )
+    await message.answer("Привет! Твой трекер обновлен 🚀")
+    await go_home(message.chat.id, state)
 
 
 # 1. ЗАДАЧИ
 @dp.message(F.text == "📝 Задачи")
 async def btn_tasks(message: Message, state: FSMContext):
     await state.set_state(Creator.task_name)
-    await message.answer("Как назвать задачу?", reply_markup=main_menu_kb())
+    await message.answer("Введи название задачи:")
 
 
 @dp.message(Creator.task_name)
@@ -221,14 +255,14 @@ async def process_new_task(message: Message, state: FSMContext):
         await db.commit()
         task_id = cur.lastrowid
     await state.clear()
-    await message.answer(await get_task_text(task_id), reply_markup=task_kb(task_id), parse_mode="Markdown")
+    await message.answer(await get_task_text(task_id), reply_markup=task_kb(task_id), parse_mode=ParseMode.HTML)
 
 
 # 2. ЦЕЛИ
 @dp.message(F.text == "🎯 Цели")
 async def btn_goals(message: Message, state: FSMContext):
     await state.set_state(Creator.goal_name)
-    await message.answer("Как назвать цель?", reply_markup=main_menu_kb())
+    await message.answer("Введи название цели:")
 
 
 @dp.message(Creator.goal_name)
@@ -240,14 +274,14 @@ async def process_new_goal(message: Message, state: FSMContext):
         await db.commit()
         goal_id = cur.lastrowid
     await state.clear()
-    await message.answer(await get_goal_text(goal_id), reply_markup=goal_kb(goal_id), parse_mode="Markdown")
+    await message.answer(await get_goal_text(goal_id), reply_markup=goal_kb(goal_id), parse_mode=ParseMode.HTML)
 
 
 # 3. СОБЫТИЯ
 @dp.message(F.text == "📅 События")
 async def btn_events(message: Message, state: FSMContext):
     await state.set_state(Creator.event_name)
-    await message.answer("Как назвать событие?", reply_markup=main_menu_kb())
+    await message.answer("Как назвать событие?")
 
 
 @dp.message(Creator.event_name)
@@ -259,14 +293,14 @@ async def process_new_event(message: Message, state: FSMContext):
         await db.commit()
         event_id = cur.lastrowid
     await state.clear()
-    await message.answer(await get_event_text(event_id), reply_markup=event_kb(event_id), parse_mode="Markdown")
+    await message.answer(await get_event_text(event_id), reply_markup=event_kb(event_id), parse_mode=ParseMode.HTML)
 
 
 # 4. ПРИВЫЧКИ
 @dp.message(F.text == "🌱 Привычки")
 async def btn_habits(message: Message, state: FSMContext):
     await state.set_state(Creator.habit_name)
-    await message.answer("Как назвать привычку?", reply_markup=main_menu_kb())
+    await message.answer("Как назвать привычку?")
 
 
 @dp.message(Creator.habit_name)
@@ -276,17 +310,17 @@ async def process_new_habit(message: Message, state: FSMContext):
         await db.execute("INSERT INTO habits (text) VALUES (?)", (text,))
         await db.commit()
     await state.clear()
-    await message.answer(f"🌱 Привычка добавлена: *{text}*", reply_markup=habit_kb(), parse_mode="Markdown")
+
+    ans = f"🌱 <b>Привычка добавлена</b>\n\n<blockquote><b>Название:</b> {html.escape(text)}</blockquote>"
+    await message.answer(ans, reply_markup=habit_kb(), parse_mode=ParseMode.HTML)
 
 
 # 5. ОТЧЕТ АКТИВНОСТИ
 @dp.message(F.text == "📊 Отчет активности")
 async def btn_report(message: Message, state: FSMContext):
-    await state.clear()
     today = date.today().isoformat()
     d_from = (date.today() - timedelta(days=6)).isoformat()
 
-    # Генерация отчета напрямую из базы
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM tasks") as cur:
@@ -308,19 +342,23 @@ async def btn_report(message: Message, state: FSMContext):
     pct = int((total_done / planned * 100)) if planned > 0 else 0
 
     text = (
-        f"📊 *Отчет за последние 7 дней:*\n\n"
-        f"Запланировано задач: {planned}\n"
-        f"Выполнено задач: {total_done}\n"
-        f"Процент выполнения: {pct}%\n"
+        f"📊 <b>Отчет за последние 7 дней</b>\n\n"
+        f"<blockquote>"
+        f"<b>Запланировано:</b> {planned}\n"
+        f"<b>Выполнено:</b> {total_done}\n"
+        f"<b>Успеваемость:</b> {pct}%\n"
+        f"</blockquote>"
     )
-    await message.answer(text, reply_markup=main_menu_kb(), parse_mode="Markdown")
+    await message.answer(text, parse_mode=ParseMode.HTML)
+    await go_home(message.chat.id, state)
 
 
 # --- ИНТЕРАКТИВНОЕ РЕДАКТИРОВАНИЕ (CALLBACKS) ---
 @dp.callback_query(F.data == "close_kb")
-async def cq_close_kb(cq: CallbackQuery):
+async def cq_close_kb(cq: CallbackQuery, state: FSMContext):
     await cq.message.edit_reply_markup(reply_markup=None)
     await cq.answer("Сохранено!")
+    await go_home(cq.message.chat.id, state)
 
 
 @dp.callback_query(F.data.startswith("t_lvl:"))
@@ -333,7 +371,7 @@ async def cq_t_lvl(cq: CallbackQuery):
                 lvl = r[0] % 3 + 1
                 await db.execute("UPDATE tasks SET level = ? WHERE id = ?", (lvl, task_id))
                 await db.commit()
-    await cq.message.edit_text(await get_task_text(task_id), reply_markup=task_kb(task_id), parse_mode="Markdown")
+    await cq.message.edit_text(await get_task_text(task_id), reply_markup=task_kb(task_id), parse_mode=ParseMode.HTML)
     await cq.answer()
 
 
@@ -347,56 +385,56 @@ async def cq_t_rep(cq: CallbackQuery):
                 nxt = {"none": "daily", "daily": "weekdays", "weekdays": "none"}[r[0]]
                 await db.execute("UPDATE tasks SET repeat_type = ? WHERE id = ?", (nxt, task_id))
                 await db.commit()
-    await cq.message.edit_text(await get_task_text(task_id), reply_markup=task_kb(task_id), parse_mode="Markdown")
+    await cq.message.edit_text(await get_task_text(task_id), reply_markup=task_kb(task_id), parse_mode=ParseMode.HTML)
     await cq.answer()
 
 
 async def init_edit_state(cq: CallbackQuery, state: FSMContext, next_state, prompt_text: str):
     item_id = int(cq.data.split(":")[1])
     await state.set_state(next_state)
-    msg = await cq.message.answer(prompt_text)
+    msg = await cq.message.answer(f"<i>{prompt_text}</i>", parse_mode=ParseMode.HTML)
     await state.update_data(id=item_id, msg_id=cq.message.message_id, prompt_id=msg.message_id)
     await cq.answer()
 
 
 @dp.callback_query(F.data.startswith("t_date:"))
 async def cq_t_date(cq: CallbackQuery, state: FSMContext): await init_edit_state(cq, state, Editor.t_date,
-                                                                                 "📅 Введите срок (ГГГГ-ММ-ДД):")
+                                                                                 "Введите срок (ГГГГ-ММ-ДД):")
 
 
 @dp.callback_query(F.data.startswith("t_time:"))
 async def cq_t_time(cq: CallbackQuery, state: FSMContext): await init_edit_state(cq, state, Editor.t_time,
-                                                                                 "⏰ Введите время (ЧЧ:ММ):")
+                                                                                 "Введите время (ЧЧ:ММ):")
 
 
 @dp.callback_query(F.data.startswith("t_sub:"))
 async def cq_t_sub(cq: CallbackQuery, state: FSMContext): await init_edit_state(cq, state, Editor.t_sub,
-                                                                                "➕ Введите текст подзадачи:")
+                                                                                "Введите текст подзадачи:")
 
 
 @dp.callback_query(F.data.startswith("t_note:"))
 async def cq_t_note(cq: CallbackQuery, state: FSMContext): await init_edit_state(cq, state, Editor.t_note,
-                                                                                 "📝 Введите текст заметки:")
+                                                                                 "Введите текст заметки:")
 
 
 @dp.callback_query(F.data.startswith("g_tgt:"))
 async def cq_g_tgt(cq: CallbackQuery, state: FSMContext): await init_edit_state(cq, state, Editor.g_tgt,
-                                                                                "🎯 Введите новое значение цели (число):")
+                                                                                "Введите новое значение цели (число):")
 
 
 @dp.callback_query(F.data.startswith("g_unt:"))
 async def cq_g_unt(cq: CallbackQuery, state: FSMContext): await init_edit_state(cq, state, Editor.g_unt,
-                                                                                "⚖️ Введите единицу измерения:")
+                                                                                "Введите единицу измерения:")
 
 
 @dp.callback_query(F.data.startswith("e_date:"))
 async def cq_e_date(cq: CallbackQuery, state: FSMContext): await init_edit_state(cq, state, Editor.e_date,
-                                                                                 "📅 Введите новую дату (ГГГГ-ММ-ДД):")
+                                                                                 "Введите новую дату (ГГГГ-ММ-ДД):")
 
 
 @dp.callback_query(F.data.startswith("e_time:"))
 async def cq_e_time(cq: CallbackQuery, state: FSMContext): await init_edit_state(cq, state, Editor.e_time,
-                                                                                 "⏰ Введите время (ЧЧ:ММ):")
+                                                                                 "Введите время (ЧЧ:ММ):")
 
 
 async def finish_edit(message: Message, state: FSMContext, entity_type: str, item_id: int):
@@ -409,13 +447,13 @@ async def finish_edit(message: Message, state: FSMContext, entity_type: str, ite
 
     if entity_type == 'task':
         await bot.edit_message_text(await get_task_text(item_id), chat_id=message.chat.id, message_id=data['msg_id'],
-                                    reply_markup=task_kb(item_id), parse_mode="Markdown")
+                                    reply_markup=task_kb(item_id), parse_mode=ParseMode.HTML)
     elif entity_type == 'goal':
         await bot.edit_message_text(await get_goal_text(item_id), chat_id=message.chat.id, message_id=data['msg_id'],
-                                    reply_markup=goal_kb(item_id), parse_mode="Markdown")
+                                    reply_markup=goal_kb(item_id), parse_mode=ParseMode.HTML)
     elif entity_type == 'event':
         await bot.edit_message_text(await get_event_text(item_id), chat_id=message.chat.id, message_id=data['msg_id'],
-                                    reply_markup=event_kb(item_id), parse_mode="Markdown")
+                                    reply_markup=event_kb(item_id), parse_mode=ParseMode.HTML)
     await state.clear()
 
 
@@ -520,6 +558,7 @@ async def process_e_time(message: Message, state: FSMContext):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Фоновая установка кнопки при старте сервера
     await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Трекер", web_app=WebAppInfo(url=WEBAPP_URL)))
     polling_task = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
     reminder_task = asyncio.create_task(reminder_loop())
@@ -811,8 +850,9 @@ async def check_reminders():
             if r["reminded_on"] == day or is_done(r, today): continue
             due = datetime.fromisoformat(f"{day}T{r['due_time']}")
             if due - timedelta(minutes=r["remind_min"]) <= now < due + timedelta(hours=1):
-                await bot.send_message(int(chat["value"]), f"⏰ *Напоминание:* {r['text']} — в {r['due_time']}",
-                                       parse_mode="Markdown")
+                await bot.send_message(int(chat["value"]),
+                                       f"⏰ <b>Напоминание:</b> {html.escape(r['text'])} — в {r['due_time']}",
+                                       parse_mode=ParseMode.HTML)
                 await db.execute("UPDATE tasks SET reminded_on = ? WHERE id = ?", (day, r["id"]))
                 await db.commit()
 
