@@ -108,7 +108,7 @@ async def init_db():
         await db.commit()
 
 
-# --- КЛАВИАТУРЫ И ЦЕНТРАЛЬНАЯ ЛОГИКА ---
+# --- КЛАВИАТУРЫ ---
 def main_menu_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -118,23 +118,6 @@ def main_menu_kb():
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие ниже..."
-    )
-
-
-async def go_home(chat_id: int, state: FSMContext):
-    """Сбрасывает состояние, обновляет кнопку WebApp и показывает главное сообщение."""
-    await state.clear()
-
-    # Принудительно обновляем кнопку приложения для текущего чата
-    await bot.set_chat_menu_button(
-        chat_id=chat_id,
-        menu_button=MenuButtonWebApp(text="Трекер", web_app=WebAppInfo(url=WEBAPP_URL))
-    )
-
-    await bot.send_message(
-        chat_id=chat_id,
-        text="Что делаем дальше?👇",
-        reply_markup=main_menu_kb()
     )
 
 
@@ -227,14 +210,32 @@ def habit_kb():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Готово", callback_data="close_kb")]])
 
 
-# --- БОТ: ГЛАВНОЕ МЕНЮ И СОЗДАНИЕ ---
+# --- БОТ: СТАРТ И СОЗДАНИЕ ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('chat_id', ?)", (str(message.chat.id),))
         await db.commit()
-    await message.answer("Привет! Твой трекер обновлен 🚀")
-    await go_home(message.chat.id, state)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Начать планировать", callback_data="start_planning")]
+    ])
+    await message.answer("Добро пожаловать в трекер!", reply_markup=kb)
+
+
+@dp.callback_query(F.data == "start_planning")
+async def cq_start_planning(cq: CallbackQuery, state: FSMContext):
+    await cq.message.delete()
+
+    # Обновляем кнопку WebApp слева от поля ввода
+    await bot.set_chat_menu_button(
+        chat_id=cq.message.chat.id,
+        menu_button=MenuButtonWebApp(text="Трекер", web_app=WebAppInfo(url=WEBAPP_URL))
+    )
+
+    await cq.message.answer("Выбери, что добавить 👇", reply_markup=main_menu_kb())
+    await cq.answer()
 
 
 # 1. ЗАДАЧИ
@@ -350,15 +351,21 @@ async def btn_report(message: Message, state: FSMContext):
         f"</blockquote>"
     )
     await message.answer(text, parse_mode=ParseMode.HTML)
-    await go_home(message.chat.id, state)
 
 
 # --- ИНТЕРАКТИВНОЕ РЕДАКТИРОВАНИЕ (CALLBACKS) ---
 @dp.callback_query(F.data == "close_kb")
 async def cq_close_kb(cq: CallbackQuery, state: FSMContext):
+    # При нажатии "Готово" просто убираем клавиатуру под карточкой
     await cq.message.edit_reply_markup(reply_markup=None)
     await cq.answer("Сохранено!")
-    await go_home(cq.message.chat.id, state)
+    await state.clear()
+
+    # Тихо, на фоне, страхуем кнопку WebApp
+    await bot.set_chat_menu_button(
+        chat_id=cq.message.chat.id,
+        menu_button=MenuButtonWebApp(text="Трекер", web_app=WebAppInfo(url=WEBAPP_URL))
+    )
 
 
 @dp.callback_query(F.data.startswith("t_lvl:"))
@@ -558,7 +565,6 @@ async def process_e_time(message: Message, state: FSMContext):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    # Фоновая установка кнопки при старте сервера
     await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Трекер", web_app=WebAppInfo(url=WEBAPP_URL)))
     polling_task = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
     reminder_task = asyncio.create_task(reminder_loop())
