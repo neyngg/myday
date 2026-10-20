@@ -596,6 +596,19 @@ input[type="date"].glass-input,input[type="time"].glass-input{min-width:0;-webki
 body{position:relative}
 #plants{position:absolute;top:0;left:0;width:100%;height:100%;z-index:-1;pointer-events:none;overflow:hidden}
 .scene.on{opacity:.28}
+
+/* ===== стрелка подзадач и листание дня ===== */
+.task-item.has-subs{flex-wrap:wrap}
+.task-item .task-left{min-width:0}
+.sub-toggle{display:flex;align-items:center;gap:2px;min-height:44px;padding:0 6px 0 10px;margin:-8px -6px -8px 0;background:none;border:none;color:var(--ink-2);font:inherit;font-size:12px;font-weight:700;cursor:pointer;flex-shrink:0}
+.sub-toggle svg{transition:transform .25s ease}
+.sub-toggle.open svg{transform:rotate(180deg)}
+.sub-toggle.open{color:var(--ink)}
+.sub-panel{flex:0 0 100%;margin:6px 0 -4px 0;padding:2px 0 2px 28px;border-top:1px solid var(--line);animation:fadeIn .2s ease forwards}
+.sub-panel .sub{min-height:40px}
+.modal-head .modal-title#modalDate{flex:1;text-align:center;font-size:17px;line-height:1.2;padding:0 4px}
+.day-nav{width:44px;height:44px;flex-shrink:0;border:none;border-radius:50%;background:var(--bg,rgba(0,0,0,.05));color:var(--ink);font-size:26px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0 0 3px}
+.day-nav:active{transform:scale(.92)}
 </style>
 </head>
 <body>
@@ -695,7 +708,9 @@ body{position:relative}
     <div class="modal-overlay" id="eventModal" onclick="if(event.target === this) closeModal()">
         <div class="modal">
             <div class="modal-head">
+                <button class="day-nav" onclick="shiftModalDay(-1)" title="Предыдущий день" aria-label="Предыдущий день">‹</button>
                 <span class="modal-title" id="modalDate"></span>
+                <button class="day-nav" onclick="shiftModalDay(1)" title="Следующий день" aria-label="Следующий день">›</button>
                 <button class="btn-delete" onclick="closeModal()" title="Закрыть">✕</button>
             </div>
             <div class="event-list" id="eventList"></div>
@@ -892,7 +907,11 @@ body{position:relative}
         }
 
         // Центральная кнопка «+» зависит от открытой вкладки
-        function onPlus() { document.getElementById('createMenu').classList.add('open'); }
+        function onPlus() {
+            // Главная (и отчёт) — меню из 4 категорий; на остальных вкладках — сразу создание своего элемента
+            const direct = { tasks: openNewTask, habits: openNewHabit, goals: openNewGoal, focus: () => openModal(todayStr()) }[currentTab];
+            if (direct) direct(); else document.getElementById('createMenu').classList.add('open');
+        }
         function closeMenu() { document.getElementById('createMenu').classList.remove('open'); }
         function pick(kind) {
             closeMenu();
@@ -1052,6 +1071,14 @@ body{position:relative}
             l.forEach(t => list.appendChild(taskRow(t)));
         }
 
+        const expandedTasks = new Set();
+        function toggleSubs(id) {
+            if (expandedTasks.has(id)) expandedTasks.delete(id); else expandedTasks.add(id);
+            // задача может быть отрисована и на главной, и во вкладке «Задачи» — обновляем все копии
+            const t = taskCache[id], els = document.querySelectorAll(`.task-item[data-tid="${id}"]`);
+            if (t && els.length) els.forEach(el => el.replaceWith(taskRow(t))); else refreshTasks();
+        }
+
         function taskRow(t) {
             const parts = [];
             if (t.time) parts.push(t.time);
@@ -1059,9 +1086,10 @@ body{position:relative}
             if (t.repeat !== 'none') parts.push(REPEAT_NAMES[t.repeat]);
             if (t.category) parts.push(escapeHtml(t.category));
             const n = t.subs.length, dn = t.subs.filter(x => x.done).length;
-            if (n) parts.push(`${dn}/${n}`);
+            const open = n > 0 && expandedTasks.has(t.id);
             const item = document.createElement('div');
-            item.className = `task-item ${t.completed ? 'completed' : ''} ${t.overdue ? 'overdue' : ''} priority-${t.priority}`;
+            item.dataset.tid = t.id;
+            item.className = `task-item ${n ? 'has-subs' : ''} ${t.completed ? 'completed' : ''} ${t.overdue ? 'overdue' : ''} priority-${t.priority}`;
             item.innerHTML = `
                 <div class="task-left">
                     <div class="chk-hit" onclick="toggleTask(${t.id})" role="checkbox" aria-checked="${!!t.completed}" aria-label="Выполнено"><div class="checkbox ${t.completed ? 'checked' : ''}"></div></div>
@@ -1070,7 +1098,9 @@ body{position:relative}
                         ${parts.length ? `<span class="task-meta ${t.overdue ? 'overdue' : ''}">${parts.join(' · ')}</span>` : ''}
                         ${n ? `<div class="progress mini"><div style="width:${Math.round(dn / n * 100)}%"></div></div>` : ''}
                     </div>
-                </div>`;
+                </div>
+                ${n ? `<button class="sub-toggle ${open ? 'open' : ''}" onclick="toggleSubs(${t.id})" aria-expanded="${open}" aria-label="Подзадачи: ${dn} из ${n}"><span class="sub-count">${dn}/${n}</span><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>` : ''}
+                ${open ? `<div class="sub-panel">${t.subs.map(x => `<div class="sub"><div class="chk-hit" onclick="toggleSub(${x.id})" role="checkbox" aria-checked="${x.done}"><div class="checkbox ${x.done ? 'checked' : ''}"></div></div><span class="${x.done ? 'sdone' : ''}">${escapeHtml(x.text)}</span></div>`).join('')}</div>` : ''}`;
             return item;
         }
 
@@ -1576,6 +1606,39 @@ body{position:relative}
         function pickColor(c) { pickedColor = c; buildPickers(); }
         function pickEmoji(e) { pickedEmoji = e; buildPickers(); }
 
+        function setModalLabel() {
+            const [y, m, d] = modalDateKey.split('-').map(Number);
+            document.getElementById('modalDate').innerText = new Date(y, m - 1, d).toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+        }
+
+        // Листание дня стрелками (или свайпом по шапке) прямо в окне события
+        let shiftSeq = 0;
+        async function shiftModalDay(delta) {
+            if (!modalDateKey) return;
+            const [y, m, d] = modalDateKey.split('-').map(Number);
+            const nd = new Date(y, m - 1, d + delta);
+            const key = dateKey(nd.getFullYear(), nd.getMonth(), nd.getDate());
+            const seq = ++shiftSeq;
+            if (nd.getFullYear() !== viewYear || nd.getMonth() !== viewMonth) {
+                viewYear = nd.getFullYear(); viewMonth = nd.getMonth();
+                if (currentTab === 'focus') await renderCalendar(); else await loadEvents();
+                if (seq !== shiftSeq || !modalDateKey) return; // пользователь уже листнул дальше или закрыл окно
+            }
+            modalDateKey = key;
+            setModalLabel();
+            renderModalEvents();
+        }
+        (() => {
+            const head = document.querySelector('#eventModal .modal-head');
+            let x0 = null;
+            head.addEventListener('touchstart', e => { x0 = e.touches[0].clientX; }, { passive: true });
+            head.addEventListener('touchend', e => {
+                if (x0 === null) return;
+                const dx = e.changedTouches[0].clientX - x0; x0 = null;
+                if (Math.abs(dx) > 50) shiftModalDay(dx < 0 ? 1 : -1);
+            }, { passive: true });
+        })();
+
         async function openModal(key) {
             modalDateKey = key;
             const [y, m, d] = key.split('-').map(Number);
@@ -1584,8 +1647,7 @@ body{position:relative}
                 viewYear = y; viewMonth = m - 1;
                 await loadEvents();
             }
-            const label = new Date(y, m - 1, d).toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
-            document.getElementById('modalDate').innerText = label;
+            setModalLabel();
             document.getElementById('eventTitle').value = '';
             document.getElementById('eventTime').value = '';
             pickedColor = COLORS[0];
