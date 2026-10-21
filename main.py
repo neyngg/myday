@@ -666,18 +666,19 @@ def habit_view(row, days: set[str], today: str) -> dict:
     }
 
 
-async def list_habits(db, today: str) -> list[dict]:
+async def list_habits(db, today: str, uid: int) -> list[dict]:
     db.row_factory = aiosqlite.Row
-    async with db.execute("SELECT id, text, created_on FROM habits ORDER BY id DESC") as cur: rows = await cur.fetchall()
-    async with db.execute("SELECT habit_id, day FROM habit_logs") as cur: logs = await cur.fetchall()
+    async with db.execute("SELECT id, text, created_on FROM habits WHERE user_id = ? ORDER BY id DESC", (uid,)) as cur: rows = await cur.fetchall()
+    async with db.execute("SELECT habit_id, day FROM habit_logs WHERE habit_id IN (SELECT id FROM habits WHERE user_id = ?)",
+                          (uid,)) as cur: logs = await cur.fetchall()
     by: dict[int, set] = {}
     for l in logs: by.setdefault(l["habit_id"], set()).add(l["day"])
     return [habit_view(r, by.get(r["id"], set()), today) for r in rows]
 
 
-async def toggle_habit_db(db, habit_id: int, day: str, today: str) -> dict:
+async def toggle_habit_db(db, habit_id: int, day: str, today: str, uid: int) -> dict:
     db.row_factory = aiosqlite.Row
-    async with db.execute("SELECT id, text, created_on FROM habits WHERE id = ?", (habit_id,)) as cur:
+    async with db.execute("SELECT id, text, created_on FROM habits WHERE id = ? AND user_id = ?", (habit_id, uid)) as cur:
         row = await cur.fetchone()
     if not row: raise DomainError(404, "Привычка не найдена")
     d, t = parse_day(day, "День"), date.fromisoformat(today)
@@ -695,11 +696,12 @@ async def toggle_habit_db(db, habit_id: int, day: str, today: str) -> dict:
     return habit_view(row, days, today)
 
 
-async def create_habit(db, text: str, today: str | None = None) -> int:
+async def create_habit(db, text: str, uid: int, today: str | None = None) -> int:
     text = (text or "").strip()
     if not text: raise DomainError(400, "Пустое название")
     if len(text) > 120: raise DomainError(400, "Название слишком длинное")
-    cur = await db.execute("INSERT INTO habits (text, created_on) VALUES (?, ?)", (text, today or today_iso()))
+    cur = await db.execute("INSERT INTO habits (text, created_on, user_id) VALUES (?, ?, ?)",
+                           (text, today or today_iso(), uid))
     await db.commit()
     return cur.lastrowid
 
@@ -707,25 +709,26 @@ async def create_habit(db, text: str, today: str | None = None) -> int:
 # =====================================================================
 #  ЦЕЛИ: операции
 # =====================================================================
-async def fetch_goal(db, goal_id: int):
+async def fetch_goal(db, goal_id: int, uid: int):
     db.row_factory = aiosqlite.Row
-    async with db.execute("SELECT id, title, emoji, unit, target, current FROM goals WHERE id = ?", (goal_id,)) as cur:
+    async with db.execute("SELECT id, title, emoji, unit, target, current FROM goals WHERE id = ? AND user_id = ?",
+                          (goal_id, uid)) as cur:
         r = await cur.fetchone()
     if not r: raise DomainError(404, "Цель не найдена")
     return r
 
 
-async def set_goal_target(db, goal_id: int, target) -> float:
-    await fetch_goal(db, goal_id)
+async def set_goal_target(db, goal_id: int, target, uid: int) -> float:
+    await fetch_goal(db, goal_id, uid)
     v = check_positive(target, "Значение цели")
     await db.execute("UPDATE goals SET target = ? WHERE id = ?", (v, goal_id))
     await db.commit()
     return v
 
 
-async def apply_goal_progress(db, goal_id: int, mode: str, value) -> dict:
+async def apply_goal_progress(db, goal_id: int, mode: str, value, uid: int) -> dict:
     if mode not in ("add", "set"): raise DomainError(400, "Режим прогресса: add или set")
-    await fetch_goal(db, goal_id)
+    await fetch_goal(db, goal_id, uid)
     v = check_number(value, "Значение")
     if mode == "set":
         if v < 0: raise DomainError(400, "Прогресс не может быть отрицательным")
@@ -733,7 +736,7 @@ async def apply_goal_progress(db, goal_id: int, mode: str, value) -> dict:
     else:
         await db.execute("UPDATE goals SET current = MAX(current + ?, 0) WHERE id = ?", (v, goal_id))
     await db.commit()
-    return dict(await fetch_goal(db, goal_id))
+    return dict(await fetch_goal(db, goal_id, uid))
 
 
 # =====================================================================
@@ -849,7 +852,7 @@ def habit_kb():
 async def build_plan(today: str, uid: int):
     async with aiosqlite.connect(DB_NAME) as db:
         tasks = await list_tasks(db, today, "today", uid)
-        habits = await list_habits(db, today)
+        habits = await list_habits(db, today, uid)
     # просроченные — наверх, выполненные — вниз
     tasks.sort(key=lambda t: (t["completed"], not t["overdue"], t["time"] is None, t["time"] or "", -t["level"]))
     slipped = sum(1 for t in tasks if t["overdue"])
@@ -976,8 +979,8 @@ async def process_new_goal(message: Message, state: FSMContext):
         await message.answer("⚠️ Нужен текст — введи название цели:")
         return
     async with aiosqlite.connect(DB_NAME) as db:
-        cur = await db.execute("INSERT INTO goals (title, emoji, unit, target, current) VALUES (?, '🎯', '', 100, 0)",
-                               (title,))
+        cur = await db.execute("INSERT INTO goals (title, emoji, unit, target, current, user_id) VALUES (?, '🎯', '', 100, 0, ?)",
+                               (title, message.from_user.id))
         await db.commit()
         goal_id = cur.lastrowid
     await state.clear()
@@ -998,8 +1001,8 @@ async def process_new_event(message: Message, state: FSMContext):
         await message.answer("⚠️ Нужен текст — как назвать событие?")
         return
     async with aiosqlite.connect(DB_NAME) as db:
-        cur = await db.execute("INSERT INTO events (date, title, color, emoji) VALUES (?, ?, '#3a86ff', '📌')",
-                               (today_iso(), title))
+        cur = await db.execute("INSERT INTO events (date, title, color, emoji, user_id) VALUES (?, ?, '#3a86ff', '📌', ?)",
+                               (today_iso(), title, message.from_user.id))
         await db.commit()
         event_id = cur.lastrowid
     await state.clear()
@@ -1018,7 +1021,7 @@ async def process_new_habit(message: Message, state: FSMContext):
     text = (message.text or "").strip()
     try:
         async with aiosqlite.connect(DB_NAME) as db:
-            await create_habit(db, text)
+            await create_habit(db, text, message.from_user.id)
     except DomainError as e:
         await message.answer(f"⚠️ {e.message}. Попробуй ещё раз:")
         return
@@ -1109,7 +1112,7 @@ async def cq_pl_hab(cq: CallbackQuery):
     today = today_iso()
     try:
         async with aiosqlite.connect(DB_NAME) as db:
-            await toggle_habit_db(db, int(cq.data.split(":")[1]), today, today)
+            await toggle_habit_db(db, int(cq.data.split(":")[1]), today, today, cq.from_user.id)
     except DomainError as e:
         return await cq.answer(e.message, show_alert=True)
     await refresh_plan(cq)
@@ -1158,10 +1161,11 @@ async def cq_t_rep(cq: CallbackQuery):
 
 async def init_edit_state(cq: CallbackQuery, state: FSMContext, next_state, prompt_text: str):
     item_id = int(cq.data.split(":")[1])
-    if not cq.data.startswith(("g_", "e_")):  # всё остальное здесь — задачи: править можно только свои
-        async with aiosqlite.connect(DB_NAME) as db:
-            async with db.execute("SELECT 1 FROM tasks WHERE id = ? AND user_id = ?", (item_id, cq.from_user.id)) as cur:
-                if not await cur.fetchone(): return await cq.answer("Задача не найдена", show_alert=True)
+    # править можно только свои задачи, цели и события
+    table = "goals" if cq.data.startswith("g_") else "events" if cq.data.startswith("e_") else "tasks"
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(f"SELECT 1 FROM {table} WHERE id = ? AND user_id = ?", (item_id, cq.from_user.id)) as cur:
+            if not await cur.fetchone(): return await cq.answer("Не найдено", show_alert=True)
     await state.set_state(next_state)
     msg = await cq.message.answer(f"<i>{prompt_text}</i>", parse_mode=ParseMode.HTML)
     await state.update_data(id=item_id, msg_id=cq.message.message_id, prompt_id=msg.message_id)
@@ -1331,7 +1335,7 @@ async def process_g_tgt(message: Message, state: FSMContext):
     data = await state.get_data()
     try:
         async with aiosqlite.connect(DB_NAME) as db:
-            await set_goal_target(db, data['id'], (message.text or "").strip().replace(",", "."))
+            await set_goal_target(db, data['id'], (message.text or "").strip().replace(",", "."), message.from_user.id)
     except DomainError as e:
         await message.answer(f"⚠️ {e.message}. Отмена.")
         await state.clear()
@@ -1343,7 +1347,8 @@ async def process_g_tgt(message: Message, state: FSMContext):
 async def process_g_unt(message: Message, state: FSMContext):
     data = await state.get_data()
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE goals SET unit = ? WHERE id = ?", ((message.text or "").strip(), data['id']))
+        await db.execute("UPDATE goals SET unit = ? WHERE id = ? AND user_id = ?",
+                         ((message.text or "").strip(), data['id'], message.from_user.id))
         await db.commit()
     await finish_edit(message, state, 'goal', data['id'])
 
@@ -1358,7 +1363,7 @@ async def process_e_date(message: Message, state: FSMContext):
         await state.clear()
         return
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE events SET date = ? WHERE id = ?", (d, data['id']))
+        await db.execute("UPDATE events SET date = ? WHERE id = ? AND user_id = ?", (d, data['id'], message.from_user.id))
         await db.commit()
     await finish_edit(message, state, 'event', data['id'])
 
@@ -1373,7 +1378,7 @@ async def process_e_time(message: Message, state: FSMContext):
         await state.clear()
         return
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE events SET time = ? WHERE id = ?", (t, data['id']))
+        await db.execute("UPDATE events SET time = ? WHERE id = ? AND user_id = ?", (t, data['id'], message.from_user.id))
         await db.commit()
     await finish_edit(message, state, 'event', data['id'])
 
@@ -1902,7 +1907,7 @@ HISTORY_KEEP_DAYS = 90
 KB_EDIT_WINDOW = timedelta(hours=46)  # Telegram не позволяет править сообщения старше 48 часов
 INIT_DATA_MAX_AGE = 7 * 24 * 3600
 # 1 — без initData API работает с «основным» пользователем (как раньше, без авторизации); 0 — только из Telegram
-ALLOW_NO_AUTH = os.getenv("ALLOW_NO_AUTH", "1") != "0"
+ALLOW_NO_AUTH = os.getenv("ALLOW_NO_AUTH", "0") == "1"
 
 DEFAULT_SETTINGS = {
     "enabled": 1, "remind_30": 1, "remind_10": 1,
@@ -2059,6 +2064,19 @@ NOTIFY_MIGRATIONS = [
         "DELETE FROM tasks",
         "DELETE FROM notification_log WHERE task_id IS NOT NULL",
     ]),
+    # Привычки, события и цели тоже становятся личными. Старые записи были общими (без владельца) — удаляем их.
+    ("notifications_004_personal_data", [
+        ("ADD_COLUMN", "habits", "user_id", "INTEGER"),
+        ("ADD_COLUMN", "goals", "user_id", "INTEGER"),
+        ("ADD_COLUMN", "events", "user_id", "INTEGER"),
+        "DELETE FROM habit_logs",
+        "DELETE FROM habits",
+        "DELETE FROM goals",
+        "DELETE FROM events",
+        "CREATE INDEX IF NOT EXISTS idx_habits_user ON habits (user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_goals_user ON goals (user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_events_user_date ON events (user_id, date)",
+    ]),
 ]
 
 
@@ -2107,9 +2125,6 @@ async def migrate_notifications(db):
         await db.commit()
         u = await load_user(db, chat)
         if u: await skip_past_digests(db, u, list(DIGESTS), utcnow())
-    async with db.execute("SELECT user_id FROM users ORDER BY created_at, user_id LIMIT 1") as cur:
-        first = await cur.fetchone()
-    if first: await adopt_orphans(db, first[0])
     await backfill_completion_owners(db)
 
 
@@ -2167,8 +2182,6 @@ async def ensure_user(db, user_id: int, chat_id: int, reactivate: bool = False) 
     u = await load_user(db, user_id)
     if created:
         await skip_past_digests(db, u, list(DIGESTS), utcnow())
-        async with db.execute("SELECT COUNT(*) FROM users") as cur:
-            if (await cur.fetchone())[0] == 1: await adopt_orphans(db, user_id)  # самый первый пользователь забирает старые задачи
     return u
 
 
@@ -2612,7 +2625,8 @@ async def build_digest(db, kind: str, u: dict, today: str, refresh: bool = False
     if kind == "morning":
         items = sorted([t for t in open_all if not (t["overdue"] or t["past_due"])],
                        key=lambda t: (t["time"] is None, t["time"] or "", -t["level"]))
-        async with db.execute("SELECT title, time, emoji FROM events WHERE date = ? ORDER BY COALESCE(time, '99:99'), id", (today,)) as cur:
+        async with db.execute("SELECT title, time, emoji FROM events WHERE date = ? AND user_id = ? ORDER BY COALESCE(time, '99:99'), id",
+                              (today, u["user_id"])) as cur:
             events = await cur.fetchall()
         if not items and not events and not refresh: return None
         lines = [f"☀️ <b>Доброе утро! План на {title_day}</b>", ""]
@@ -2958,29 +2972,33 @@ async def send_test_notification(request: Request):
 
 # --- привычки ---
 @app.get("/api/habits")
-async def get_habits(today: str | None = None):
+async def get_habits(request: Request, today: str | None = None):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        return {"habits": await list_habits(db, client_today(today))}
+        return {"habits": await list_habits(db, client_today(today), uid)}
 
 
 @app.post("/api/habits")
-async def add_habit_api(habit: HabitCreate):
+async def add_habit_api(habit: HabitCreate, request: Request):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        hid = await create_habit(db, habit.text)
+        hid = await create_habit(db, habit.text, uid)
     return {"status": "ok", "id": hid}
 
 
 @app.post("/api/habits/{habit_id}/toggle")
-async def toggle_habit(habit_id: int, day: str | None = None, today: str | None = None):
+async def toggle_habit(habit_id: int, request: Request, day: str | None = None, today: str | None = None):
+    uid = await api_uid(request)
     t = client_today(today)
     async with aiosqlite.connect(DB_NAME) as db:
-        return {"status": "ok", "habit": await toggle_habit_db(db, habit_id, day or t, t)}
+        return {"status": "ok", "habit": await toggle_habit_db(db, habit_id, day or t, t, uid)}
 
 
 @app.delete("/api/habits/{habit_id}")
-async def delete_habit(habit_id: int):
+async def delete_habit(habit_id: int, request: Request):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        cur = await db.execute("DELETE FROM habits WHERE id = ?", (habit_id,))
+        cur = await db.execute("DELETE FROM habits WHERE id = ? AND user_id = ?", (habit_id, uid))
         if cur.rowcount == 0: raise DomainError(404, "Привычка не найдена")
         await db.execute("DELETE FROM habit_logs WHERE habit_id = ?", (habit_id,))
         await db.commit()
@@ -2989,33 +3007,37 @@ async def delete_habit(habit_id: int):
 
 # --- события ---
 @app.get("/api/events")
-async def get_events(month: str):
+async def get_events(month: str, request: Request):
+    uid = await api_uid(request)
     if not re.fullmatch(r"\d{4}-\d{2}", month): raise DomainError(400, "Месяц: ожидается формат ГГГГ-ММ")
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-                "SELECT id, date, title, time, color, emoji FROM events WHERE date LIKE ? ORDER BY date, COALESCE(time, '99:99'), id",
-                (month + "-%",)) as cursor:
+                "SELECT id, date, title, time, color, emoji FROM events WHERE user_id = ? AND date LIKE ? "
+                "ORDER BY date, COALESCE(time, '99:99'), id",
+                (uid, month + "-%")) as cursor:
             return {"events": [dict(row) for row in await cursor.fetchall()]}
 
 
 @app.post("/api/events")
-async def add_event_api(ev: EventCreate):
+async def add_event_api(ev: EventCreate, request: Request):
+    uid = await api_uid(request)
     title = ev.title.strip()
     if not title: raise DomainError(400, "Пустое название")
     day = parse_day(ev.date, "Дата").isoformat()
     time = parse_time(ev.time) if ev.time else None
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("INSERT INTO events (date, title, time, color, emoji) VALUES (?, ?, ?, ?, ?)",
-                         (day, title, time, ev.color, ev.emoji))
+        await db.execute("INSERT INTO events (date, title, time, color, emoji, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+                         (day, title, time, ev.color, ev.emoji, uid))
         await db.commit()
     return {"status": "ok"}
 
 
 @app.delete("/api/events/{event_id}")
-async def delete_event_api(event_id: int):
+async def delete_event_api(event_id: int, request: Request):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        cur = await db.execute("DELETE FROM events WHERE id = ?", (event_id,))
+        cur = await db.execute("DELETE FROM events WHERE id = ? AND user_id = ?", (event_id, uid))
         if cur.rowcount == 0: raise DomainError(404, "Событие не найдено")
         await db.commit()
     return {"status": "ok"}
@@ -3023,39 +3045,43 @@ async def delete_event_api(event_id: int):
 
 # --- цели ---
 @app.get("/api/goals")
-async def get_goals_api():
+async def get_goals_api(request: Request):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, title, emoji, unit, target, current FROM goals ORDER BY id DESC") as cursor: return {
+            "SELECT id, title, emoji, unit, target, current FROM goals WHERE user_id = ? ORDER BY id DESC", (uid,)) as cursor: return {
             "goals": [dict(row) for row in await cursor.fetchall()]}
 
 
 @app.post("/api/goals")
-async def add_goal_api(goal: GoalCreate):
+async def add_goal_api(goal: GoalCreate, request: Request):
+    uid = await api_uid(request)
     title = goal.title.strip()
     if not title: raise DomainError(400, "Пустое название")
     target = check_positive(goal.target, "Значение цели")
     current = check_number(goal.current, "Начальное значение")
     if current < 0: raise DomainError(400, "Начальное значение не может быть отрицательным")
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("INSERT INTO goals (title, emoji, unit, target, current) VALUES (?, ?, ?, ?, ?)",
-                         (title, goal.emoji, goal.unit.strip(), target, current))
+        await db.execute("INSERT INTO goals (title, emoji, unit, target, current, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+                         (title, goal.emoji, goal.unit.strip(), target, current, uid))
         await db.commit()
     return {"status": "ok"}
 
 
 @app.post("/api/goals/{goal_id}/progress")
-async def update_goal_progress(goal_id: int, p: GoalProgress):
+async def update_goal_progress(goal_id: int, p: GoalProgress, request: Request):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        goal = await apply_goal_progress(db, goal_id, p.mode, p.value)
+        goal = await apply_goal_progress(db, goal_id, p.mode, p.value, uid)
     return {"status": "ok", "goal": goal}
 
 
 @app.delete("/api/goals/{goal_id}")
-async def delete_goal_api(goal_id: int):
+async def delete_goal_api(goal_id: int, request: Request):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        cur = await db.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
+        cur = await db.execute("DELETE FROM goals WHERE id = ? AND user_id = ?", (goal_id, uid))
         if cur.rowcount == 0: raise DomainError(404, "Цель не найдена")
         await db.commit()
     return {"status": "ok"}
