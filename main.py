@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 import uvicorn
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.exceptions import (
     TelegramAPIError,
@@ -471,21 +471,23 @@ def check_series(repeat: str, planned: str, due: str | None):
         raise DomainError(400, "Дата окончания повтора раньше даты начала")
 
 
-async def fetch_task(db, task_id: int):
+async def fetch_task(db, task_id: int, uid: int):
+    """Задача пользователя uid. Чужая или несуществующая — одинаково «не найдена» (не раскрываем, что она есть)."""
     db.row_factory = aiosqlite.Row
-    async with db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)) as cur:
+    async with db.execute("SELECT * FROM tasks WHERE id = ? AND user_id = ?", (task_id, uid)) as cur:
         r = await cur.fetchone()
     if not r: raise DomainError(404, "Задача не найдена")
     return r
 
 
-async def list_tasks(db, today: str, scope: str = "today") -> list[dict]:
+async def list_tasks(db, today: str, scope: str, uid: int) -> list[dict]:
     if scope not in ("today", "week", "all"): raise DomainError(400, "Неизвестный период")
     d0 = date.fromisoformat(today)
     week = [(d0 + timedelta(days=i)).isoformat() for i in range(7)]
     db.row_factory = aiosqlite.Row
-    async with db.execute("SELECT * FROM tasks ORDER BY level DESC, id DESC") as cur: rows = await cur.fetchall()
-    async with db.execute("SELECT id, task_id, text, done FROM subtasks ORDER BY id") as cur: subs = await cur.fetchall()
+    async with db.execute("SELECT * FROM tasks WHERE user_id = ? ORDER BY level DESC, id DESC", (uid,)) as cur: rows = await cur.fetchall()
+    async with db.execute("SELECT id, task_id, text, done FROM subtasks WHERE task_id IN (SELECT id FROM tasks WHERE user_id = ?) ORDER BY id",
+                          (uid,)) as cur: subs = await cur.fetchall()
     by_task: dict[int, list] = {}
     for s in subs:
         by_task.setdefault(s["task_id"], []).append({"id": s["id"], "text": s["text"], "done": bool(s["done"])})
@@ -513,25 +515,25 @@ async def list_tasks(db, today: str, scope: str = "today") -> list[dict]:
     return tasks
 
 
-async def create_task(db, task: TaskCreate) -> int:
+async def create_task(db, task: TaskCreate, uid: int) -> int:
     v = clean_task(task)
     today = client_today(task.today)
     planned = v["planned"] or today
     check_series(v["repeat"], planned, v["due"])
     cur = await db.execute(
-        "INSERT INTO tasks (text, completed, priority, level, repeat_type, planned_date, due_date, due_time, remind_min, category, note, created_on) "
-        "VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO tasks (text, completed, priority, level, repeat_type, planned_date, due_date, due_time, remind_min, category, note, created_on, user_id) "
+        "VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (v["text"], v["priority"], v["level"], v["repeat"], planned, v["due"], v["time"], v["remind"],
-         v["category"], v["note"], today))
+         v["category"], v["note"], today, uid))
     for s in task.subtasks:
         if s.strip(): await db.execute("INSERT INTO subtasks (task_id, text) VALUES (?, ?)", (cur.lastrowid, s.strip()))
     await db.commit()
     return cur.lastrowid
 
 
-async def update_task(db, task_id: int, task: TaskCreate):
+async def update_task(db, task_id: int, task: TaskCreate, uid: int):
     v = clean_task(task)
-    old = await fetch_task(db, task_id)
+    old = await fetch_task(db, task_id, uid)
     planned = v["planned"] or planned_of(old)  # пустая плановая дата в форме = оставить как была
     check_series(v["repeat"], planned, v["due"])
     # created_on, done_on и журнал выполнения здесь не трогаем
@@ -540,40 +542,40 @@ async def update_task(db, task_id: int, task: TaskCreate):
         (v["text"], v["priority"], v["level"], v["repeat"], planned, v["due"], v["time"], v["remind"],
          v["category"], v["note"], task_id))
     await db.commit()
-    await task_changed(task_id)  # время/повтор/дата могли измениться — пересчитать расписание напоминаний
+    await task_changed(task_id, uid)  # время/повтор/дата могли измениться — пересчитать расписание напоминаний
 
 
-async def toggle_task_db(db, task_id: int, today: str):
-    row = await fetch_task(db, task_id)
+async def toggle_task_db(db, task_id: int, today: str, uid: int):
+    row = await fetch_task(db, task_id, uid)
     rep, done_on, cat = row["repeat_type"], row["done_on"], row["category"]
     was_done = (done_on == today) if rep != "none" else (done_on is not None)
     if was_done:
         await db.execute("DELETE FROM completions WHERE task_id = ? AND day = ?", (task_id, done_on))
         await db.execute("UPDATE tasks SET done_on = NULL WHERE id = ?", (task_id,))
     else:
-        await db.execute("INSERT OR IGNORE INTO completions (task_id, day, category) VALUES (?, ?, ?)",
-                         (task_id, today, cat))
+        await db.execute("INSERT OR IGNORE INTO completions (task_id, day, category, user_id) VALUES (?, ?, ?, ?)",
+                         (task_id, today, cat, uid))
         await db.execute("UPDATE tasks SET done_on = ? WHERE id = ?", (today, task_id))
     await db.commit()
-    await task_changed(task_id)
+    await task_changed(task_id, uid)
 
 
-async def complete_task_db(db, task_id: int, today: str) -> bool:
+async def complete_task_db(db, task_id: int, today: str, uid: int) -> bool:
     """Идемпотентное «Выполнено» (в отличие от toggle не снимает отметку). True — отметили сейчас, False — уже была."""
-    row = await fetch_task(db, task_id)
+    row = await fetch_task(db, task_id, uid)
     if is_done(row, today): return False
-    await db.execute("INSERT OR IGNORE INTO completions (task_id, day, category) VALUES (?, ?, ?)",
-                     (task_id, today, row["category"]))
+    await db.execute("INSERT OR IGNORE INTO completions (task_id, day, category, user_id) VALUES (?, ?, ?, ?)",
+                     (task_id, today, row["category"], uid))
     await db.execute("UPDATE tasks SET done_on = ? WHERE id = ?", (today, task_id))
     await db.commit()
-    await task_changed(task_id)
+    await task_changed(task_id, uid)
     return True
 
 
-async def move_task_db(db, task_id: int, to: str, today: str) -> str:
+async def move_task_db(db, task_id: int, to: str, today: str, uid: int) -> str:
     """Перенос = явная смена плановой даты одной разовой невыполненной задачи.
     Срок, дата создания и история выполнения (done_on, completions) не меняются."""
-    row = await fetch_task(db, task_id)
+    row = await fetch_task(db, task_id, uid)
     if row["repeat_type"] != "none":
         raise DomainError(400, "Повторяющуюся задачу перенести нельзя — она появляется по расписанию. "
                                "Измените дату начала в редакторе")
@@ -587,14 +589,14 @@ async def move_task_db(db, task_id: int, to: str, today: str) -> str:
     if iso != planned_of(row):
         await db.execute("UPDATE tasks SET planned_date = ?, reminded_on = NULL WHERE id = ?", (iso, task_id))
         await db.commit()
-        await task_changed(task_id)
+        await task_changed(task_id, uid)
     return iso
 
 
-async def shift_task_time_db(db, task_id: int, minutes: int, now: datetime) -> tuple[str, str]:
+async def shift_task_time_db(db, task_id: int, minutes: int, now: datetime, uid: int) -> tuple[str, str]:
     """Сдвиг разовой задачи со временем на N минут. Отсчёт от большего из «время задачи» и «сейчас» (пользовательское
     локальное время), чтобы просроченную задачу не переносить в прошлое. Меняет плановую дату и время."""
-    row = await fetch_task(db, task_id)
+    row = await fetch_task(db, task_id, uid)
     if row["repeat_type"] != "none":
         raise DomainError(400, "Повторяющуюся задачу перенести нельзя — она появляется по расписанию")
     if row["done_on"] is not None:
@@ -609,27 +611,27 @@ async def shift_task_time_db(db, task_id: int, minutes: int, now: datetime) -> t
     await db.execute("UPDATE tasks SET planned_date = ?, due_time = ?, reminded_on = NULL WHERE id = ?",
                      (new.date().isoformat(), new.strftime("%H:%M"), task_id))
     await db.commit()
-    await task_changed(task_id)
+    await task_changed(task_id, uid)
     return new.date().isoformat(), new.strftime("%H:%M")
 
 
-async def carry_over_db(db, today: str) -> int:
-    """Переносит на сегодня только действительно просроченные невыполненные разовые задачи."""
+async def carry_over_db(db, today: str, uid: int) -> int:
+    """Переносит на сегодня только действительно просроченные невыполненные разовые задачи пользователя."""
     cur = await db.execute(
-        "UPDATE tasks SET planned_date = ?1, reminded_on = NULL WHERE repeat_type = 'none' AND done_on IS NULL "
-        "AND COALESCE(planned_date, created_on, '2000-01-01') < ?1", (today,))
+        "UPDATE tasks SET planned_date = ?, reminded_on = NULL WHERE repeat_type = 'none' AND done_on IS NULL AND user_id = ? "
+        "AND COALESCE(planned_date, created_on, '2000-01-01') < ?", (today, uid, today))
     await db.commit()
-    if cur.rowcount: await task_changed(None)
+    if cur.rowcount: await task_changed(None, uid)
     return cur.rowcount
 
 
-async def set_task_due(db, task_id: int, value: str | None):
-    row = await fetch_task(db, task_id)
+async def set_task_due(db, task_id: int, value: str | None, uid: int):
+    row = await fetch_task(db, task_id, uid)
     due = parse_day(value, "Срок").isoformat() if value else None
     check_series(row["repeat_type"], planned_of(row), due)
     await db.execute("UPDATE tasks SET due_date = ?, reminded_on = NULL WHERE id = ?", (due, task_id))
     await db.commit()
-    await task_changed(task_id)
+    await task_changed(task_id, uid)
 
 
 # =====================================================================
@@ -844,9 +846,9 @@ def habit_kb():
 
 
 # --- ПЛАН НА СЕГОДНЯ: посмотреть → выполнить → перенести ---
-async def build_plan(today: str):
+async def build_plan(today: str, uid: int):
     async with aiosqlite.connect(DB_NAME) as db:
-        tasks = await list_tasks(db, today, "today")
+        tasks = await list_tasks(db, today, "today", uid)
         habits = await list_habits(db, today)
     # просроченные — наверх, выполненные — вниз
     tasks.sort(key=lambda t: (t["completed"], not t["overdue"], t["time"] is None, t["time"] or "", -t["level"]))
@@ -892,7 +894,7 @@ async def build_plan(today: str):
 
 
 async def refresh_plan(cq: CallbackQuery, note: str | None = None, alert: bool = False):
-    text, kb = await build_plan(today_iso())
+    text, kb = await build_plan(today_iso(), cq.from_user.id)
     try:
         await cq.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
     except TelegramBadRequest:  # «message is not modified» — план не изменился
@@ -936,7 +938,7 @@ async def cq_start_planning(cq: CallbackQuery, state: FSMContext):
 @dp.message(F.text == "📋 План")
 async def btn_plan(message: Message, state: FSMContext):
     await state.clear()
-    text, kb = await build_plan(today_iso())
+    text, kb = await build_plan(today_iso(), message.from_user.id)
     await message.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
@@ -955,7 +957,7 @@ async def process_new_task(message: Message, state: FSMContext):
         return
     today = today_iso()
     async with aiosqlite.connect(DB_NAME) as db:
-        task_id = await create_task(db, TaskCreate(text=text, repeat="none", today=today))
+        task_id = await create_task(db, TaskCreate(text=text, repeat="none", today=today), message.from_user.id)
     await state.clear()
     await message.answer(await get_task_text(task_id), reply_markup=task_kb(task_id), parse_mode=ParseMode.HTML)
 
@@ -1034,9 +1036,10 @@ async def btn_report(message: Message, state: FSMContext):
 
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM tasks") as cur:
+        async with db.execute("SELECT * FROM tasks WHERE user_id = ?", (message.from_user.id,)) as cur:
             rows = await cur.fetchall()
-        async with db.execute("SELECT day FROM completions WHERE day BETWEEN ? AND ?", (d_from, today)) as cur:
+        async with db.execute("SELECT day FROM completions WHERE day BETWEEN ? AND ? AND user_id = ?",
+                              (d_from, today, message.from_user.id)) as cur:
             comps = await cur.fetchall()
 
     done_by = Counter(c["day"] for c in comps)
@@ -1083,7 +1086,7 @@ async def cq_close_kb(cq: CallbackQuery, state: FSMContext):
 async def cq_pl_done(cq: CallbackQuery):
     try:
         async with aiosqlite.connect(DB_NAME) as db:
-            await toggle_task_db(db, int(cq.data.split(":")[1]), today_iso())
+            await toggle_task_db(db, int(cq.data.split(":")[1]), today_iso(), cq.from_user.id)
     except DomainError as e:
         return await cq.answer(e.message, show_alert=True)
     await refresh_plan(cq)
@@ -1095,7 +1098,7 @@ async def cq_pl_tom(cq: CallbackQuery):
     tomorrow = (date.fromisoformat(today) + timedelta(days=1)).isoformat()
     try:
         async with aiosqlite.connect(DB_NAME) as db:
-            await move_task_db(db, int(cq.data.split(":")[1]), tomorrow, today)
+            await move_task_db(db, int(cq.data.split(":")[1]), tomorrow, today, cq.from_user.id)
     except DomainError as e:
         return await cq.answer(e.message, show_alert=True)
     await refresh_plan(cq, "Перенесено на завтра")
@@ -1115,7 +1118,7 @@ async def cq_pl_hab(cq: CallbackQuery):
 @dp.callback_query(F.data == "pl_carry")
 async def cq_pl_carry(cq: CallbackQuery):
     async with aiosqlite.connect(DB_NAME) as db:
-        n = await carry_over_db(db, today_iso())
+        n = await carry_over_db(db, today_iso(), cq.from_user.id)
     await refresh_plan(cq, f"Перенесено на сегодня: {n}" if n else "Просроченных задач нет")
 
 
@@ -1128,12 +1131,12 @@ async def cq_pl_ref(cq: CallbackQuery):
 async def cq_t_lvl(cq: CallbackQuery):
     task_id = int(cq.data.split(":")[1])
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT level FROM tasks WHERE id = ?", (task_id,)) as cur:
+        async with db.execute("SELECT level FROM tasks WHERE id = ? AND user_id = ?", (task_id, cq.from_user.id)) as cur:
             r = await cur.fetchone()
-            if r:
-                lvl = r[0] % 3 + 1
-                await db.execute("UPDATE tasks SET level = ?, priority = ? WHERE id = ?", (lvl, int(lvl == 3), task_id))
-                await db.commit()
+            if not r: return await cq.answer("Задача не найдена", show_alert=True)
+            lvl = r[0] % 3 + 1
+            await db.execute("UPDATE tasks SET level = ?, priority = ? WHERE id = ?", (lvl, int(lvl == 3), task_id))
+            await db.commit()
     await cq.message.edit_text(await get_task_text(task_id), reply_markup=task_kb(task_id), parse_mode=ParseMode.HTML)
     await cq.answer()
 
@@ -1142,19 +1145,23 @@ async def cq_t_lvl(cq: CallbackQuery):
 async def cq_t_rep(cq: CallbackQuery):
     task_id = int(cq.data.split(":")[1])
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT repeat_type FROM tasks WHERE id = ?", (task_id,)) as cur:
+        async with db.execute("SELECT repeat_type FROM tasks WHERE id = ? AND user_id = ?", (task_id, cq.from_user.id)) as cur:
             r = await cur.fetchone()
-            if r:
-                nxt = {"none": "daily", "daily": "weekdays", "weekdays": "none"}[r[0]]
-                await db.execute("UPDATE tasks SET repeat_type = ? WHERE id = ?", (nxt, task_id))
-                await db.commit()
-    await task_changed(task_id)
+            if not r: return await cq.answer("Задача не найдена", show_alert=True)
+            nxt = {"none": "daily", "daily": "weekdays", "weekdays": "none"}[r[0]]
+            await db.execute("UPDATE tasks SET repeat_type = ? WHERE id = ?", (nxt, task_id))
+            await db.commit()
+    await task_changed(task_id, cq.from_user.id)
     await cq.message.edit_text(await get_task_text(task_id), reply_markup=task_kb(task_id), parse_mode=ParseMode.HTML)
     await cq.answer()
 
 
 async def init_edit_state(cq: CallbackQuery, state: FSMContext, next_state, prompt_text: str):
     item_id = int(cq.data.split(":")[1])
+    if not cq.data.startswith(("g_", "e_")):  # всё остальное здесь — задачи: править можно только свои
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute("SELECT 1 FROM tasks WHERE id = ? AND user_id = ?", (item_id, cq.from_user.id)) as cur:
+                if not await cur.fetchone(): return await cq.answer("Задача не найдена", show_alert=True)
     await state.set_state(next_state)
     msg = await cq.message.answer(f"<i>{prompt_text}</i>", parse_mode=ParseMode.HTML)
     await state.update_data(id=item_id, msg_id=cq.message.message_id, prompt_id=msg.message_id)
@@ -1229,7 +1236,7 @@ async def finish_edit(message: Message, state: FSMContext, entity_type: str, ite
         await bot.edit_message_text(await get_event_text(item_id), chat_id=message.chat.id, message_id=data['msg_id'],
                                     reply_markup=event_kb(item_id), parse_mode=ParseMode.HTML)
     elif entity_type == 'plan':
-        text, kb = await build_plan(today_iso())
+        text, kb = await build_plan(today_iso(), message.from_user.id)
         try:
             await bot.edit_message_text(text, chat_id=message.chat.id, message_id=data['msg_id'],
                                         reply_markup=kb, parse_mode=ParseMode.HTML)
@@ -1245,7 +1252,7 @@ async def process_p_date(message: Message, state: FSMContext):
     try:
         to = parse_user_date(message.text, today)
         async with aiosqlite.connect(DB_NAME) as db:
-            await move_task_db(db, data['id'], to, today)
+            await move_task_db(db, data['id'], to, today, message.from_user.id)
     except DomainError as e:
         # остаёмся в режиме ввода, чтобы можно было поправить дату; любая кнопка меню выходит из него
         await message.answer(f"⚠️ {e.message}. Введите дату ещё раз (например 25.10) или нажмите кнопку меню:")
@@ -1260,7 +1267,7 @@ async def process_t_date(message: Message, state: FSMContext):
     try:
         to = parse_user_date(message.text, today)
         async with aiosqlite.connect(DB_NAME) as db:
-            await move_task_db(db, data['id'], to, today)
+            await move_task_db(db, data['id'], to, today, message.from_user.id)
     except DomainError as e:
         await message.answer(f"⚠️ {e.message}. Отмена.")
         await state.clear()
@@ -1275,7 +1282,7 @@ async def process_t_due(message: Message, state: FSMContext):
     try:
         value = None if raw in ("нет", "-", "0") else parse_user_date(raw, today_iso())
         async with aiosqlite.connect(DB_NAME) as db:
-            await set_task_due(db, data['id'], value)
+            await set_task_due(db, data['id'], value, message.from_user.id)
     except DomainError as e:
         await message.answer(f"⚠️ {e.message}. Отмена.")
         await state.clear()
@@ -1295,7 +1302,7 @@ async def process_t_time(message: Message, state: FSMContext):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE tasks SET due_time = ?, reminded_on = NULL WHERE id = ?", (t, data['id']))
         await db.commit()
-    await task_changed(data['id'])
+    await task_changed(data['id'], message.from_user.id)
     await finish_edit(message, state, 'task', data['id'])
 
 
@@ -1396,6 +1403,30 @@ async def deactivate_kb(chat_id: int, message_id: int):
         log.exception("Не удалось снять отметку клавиатуры")
 
 
+# --- любой пользователь, написавший боту, сразу получает владельца задач и настройки уведомлений ---
+async def touch_user(user_id: int, chat_id: int):
+    async with notif_db() as db:
+        u = await load_user(db, user_id)
+        if not u or not u["active"] or u["chat_id"] != chat_id:
+            await ensure_user(db, user_id, chat_id, reactivate=True)  # заодно снимает блокировку после «бот остановлен»
+
+
+class EnsureUserMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        sender = getattr(event, "from_user", None)
+        if sender is not None and not sender.is_bot:
+            msg = event if isinstance(event, Message) else getattr(event, "message", None)
+            try:
+                await touch_user(sender.id, msg.chat.id if msg is not None else sender.id)
+            except Exception:
+                log.exception("Не удалось зарегистрировать пользователя %s", sender.id)  # обработчик всё равно выполнится
+        return await handler(event, data)
+
+
+dp.message.outer_middleware(EnsureUserMiddleware())
+dp.callback_query.outer_middleware(EnsureUserMiddleware())
+
+
 # --- кнопки под напоминаниями и сводками ---
 @dp.callback_query(F.data.startswith("rm_"))
 async def cq_reminder(cq: CallbackQuery, state: FSMContext):
@@ -1411,10 +1442,10 @@ async def cq_reminder(cq: CallbackQuery, state: FSMContext):
 
         if action in ("mv", "bk"):
             async with notif_db() as db:
-                task = await fetch_task_row(db, task_id)
+                task = await fetch_task_row(db, task_id, u["user_id"])
             if not task or (task["repeat_type"] == "none" and task["done_on"] is not None):
-                await refresh_messages(task_id)
-                return await cq.answer("Задача уже выполнена или удалена", show_alert=True)
+                await refresh_messages(task_id, u["user_id"])
+                return await cq.answer("Задача не найдена или уже выполнена", show_alert=True)
             if action == "mv":
                 await cq.message.edit_reply_markup(reply_markup=move_menu_kb(task, day, today))
             else:
@@ -1422,7 +1453,7 @@ async def cq_reminder(cq: CallbackQuery, state: FSMContext):
                 if row and row["kind"] in ("remind", "snooze"):
                     await cq.message.edit_reply_markup(reply_markup=reminder_kb(task_id, day))
                 else:
-                    await refresh_messages(task_id)  # сводку пересобираем целиком — вернётся список кнопок
+                    await refresh_messages(task_id, u["user_id"])  # сводку пересобираем целиком — вернётся список кнопок
             return await cq.answer()
 
         if action == "dt":
@@ -1434,13 +1465,13 @@ async def cq_reminder(cq: CallbackQuery, state: FSMContext):
         await flush_background()  # изменения уже отправили обновление всех связанных сообщений
         if action in ("z30", "z60"):
             async with notif_db() as db:
-                task = await fetch_task_row(db, task_id)
+                task = await fetch_task_row(db, task_id, u["user_id"])
             minutes = 30 if action == "z30" else 60
             await safe_edit(chat_id, msg_id, f"🔕 <b>{html.escape(task['text'])}</b> — напомню через {ru_minutes(minutes)}", None)
             await deactivate_kb(chat_id, msg_id)
         await cq.answer(toast, show_alert=alert)
     except DomainError as e:
-        if e.status == 404: await refresh_messages(task_id)
+        if e.status == 404: await refresh_messages(task_id, cq.from_user.id)
         await cq.answer(e.message, show_alert=True)
     except Exception:
         log.exception("Ошибка обработки кнопки напоминания %s", cq.data)
@@ -1458,7 +1489,7 @@ async def process_r_date(message: Message, state: FSMContext):
         today = utc_to_local(utcnow(), u["zone"]).date().isoformat()
         to = parse_user_date(message.text, today)
         async with notif_db() as db:
-            await move_task_db(db, data["id"], to, today)
+            await move_task_db(db, data["id"], to, today, u["user_id"])
     except DomainError as e:
         await message.answer(f"⚠️ {e.message}. Введите дату ещё раз (например 25.10) или нажмите кнопку меню:")
         return
@@ -1628,7 +1659,7 @@ async def quick_add(message: Message):
             raise DomainError(400, "Эта дата уже прошла")
         async with aiosqlite.connect(DB_NAME) as db:
             task_id = await create_task(
-                db, TaskCreate(text=title, repeat="none", level=level or 2, planned=planned, today=today))
+                db, TaskCreate(text=title, repeat="none", level=level or 2, planned=planned, today=today), message.from_user.id)
     except DomainError as e:
         await message.answer(f"⚠️ {html.escape(e.message)}\n\n{html.escape(QUICK_HELP)}", parse_mode=ParseMode.HTML)
         return
@@ -1689,45 +1720,54 @@ class GoalCreate(BaseModel): title: str; target: float; unit: str = ""; emoji: s
 class GoalProgress(BaseModel): mode: str; value: float
 
 
-# --- задачи ---
+# --- задачи (у каждой есть владелец; пользователь определяется по Telegram initData, см. api_user) ---
+async def api_uid(request: Request) -> int:
+    return (await api_user(request))["user_id"]
+
+
 @app.get("/api/tasks")
-async def get_tasks(today: str | None = None, scope: str = "today"):
+async def get_tasks(request: Request, today: str | None = None, scope: str = "today"):
+    uid = await api_uid(request)
     t = client_today(today)
     async with aiosqlite.connect(DB_NAME) as db:
-        return {"tasks": await list_tasks(db, t, scope)}
+        return {"tasks": await list_tasks(db, t, scope, uid)}
 
 
 @app.post("/api/tasks")
-async def add_task(task: TaskCreate):
+async def add_task(task: TaskCreate, request: Request):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        return {"status": "ok", "id": await create_task(db, task)}
+        return {"status": "ok", "id": await create_task(db, task, uid)}
 
 
 @app.put("/api/tasks/{task_id}")
-async def update_task_api(task_id: int, task: TaskCreate):
+async def update_task_api(task_id: int, task: TaskCreate, request: Request):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        await update_task(db, task_id, task)
+        await update_task(db, task_id, task, uid)
     return {"status": "ok"}
 
 
 @app.post("/api/tasks/{task_id}/toggle")
-async def toggle_task(task_id: int, today: str | None = None):
+async def toggle_task(task_id: int, request: Request, today: str | None = None):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        await toggle_task_db(db, task_id, client_today(today))
+        await toggle_task_db(db, task_id, client_today(today), uid)
     return {"status": "ok"}
 
 
 @app.post("/api/tasks/{task_id}/duplicate")
-async def duplicate_task(task_id: int):
+async def duplicate_task(task_id: int, request: Request):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        r = await fetch_task(db, task_id)
+        r = await fetch_task(db, task_id, uid)
         today = today_iso()
         planned = planned_of(r)
         if r["repeat_type"] == "none" and planned < today: planned = today  # копия не должна рождаться просроченной
         cur = await db.execute(
-            "INSERT INTO tasks (text, completed, priority, level, repeat_type, planned_date, due_date, due_time, remind_min, category, note, created_on) VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tasks (text, completed, priority, level, repeat_type, planned_date, due_date, due_time, remind_min, category, note, created_on, user_id) VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (r["text"] + " (копия)", r["priority"], r["level"], r["repeat_type"], planned, r["due_date"],
-             r["due_time"], r["remind_min"], r["category"], r["note"], today))
+             r["due_time"], r["remind_min"], r["category"], r["note"], today, uid))
         await db.execute("INSERT INTO subtasks (task_id, text) SELECT ?, text FROM subtasks WHERE task_id = ?",
                          (cur.lastrowid, task_id))
         await db.commit()
@@ -1735,68 +1775,76 @@ async def duplicate_task(task_id: int):
 
 
 @app.post("/api/tasks/{task_id}/move")
-async def move_task(task_id: int, body: MoveBody):
+async def move_task(task_id: int, body: MoveBody, request: Request):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        planned = await move_task_db(db, task_id, body.to, client_today(body.today))
+        planned = await move_task_db(db, task_id, body.to, client_today(body.today), uid)
     return {"status": "ok", "planned": planned}
 
 
 @app.post("/api/tasks/carry-over")
-async def carry_over(today: str | None = None):
+async def carry_over(request: Request, today: str | None = None):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        moved = await carry_over_db(db, client_today(today))
+        moved = await carry_over_db(db, client_today(today), uid)
     return {"status": "ok", "moved": moved}
 
 
 @app.delete("/api/tasks/{task_id}")
-async def delete_task(task_id: int):
+async def delete_task(task_id: int, request: Request):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        await fetch_task(db, task_id)
+        await fetch_task(db, task_id, uid)
         await db.execute("DELETE FROM subtasks WHERE task_id = ?", (task_id,))
         await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))  # история в completions остаётся для отчётов
         await db.commit()
-    await task_changed(task_id)
+    await task_changed(task_id, uid)
     return {"status": "ok"}
 
 
 @app.post("/api/tasks/{task_id}/subtasks")
-async def add_subtask(task_id: int, s: SubCreate):
+async def add_subtask(task_id: int, s: SubCreate, request: Request):
+    uid = await api_uid(request)
     text = s.text.strip()
     if not text: raise DomainError(400, "Пустое название")
     async with aiosqlite.connect(DB_NAME) as db:
-        await fetch_task(db, task_id)
+        await fetch_task(db, task_id, uid)
         await db.execute("INSERT INTO subtasks (task_id, text) VALUES (?, ?)", (task_id, text))
         await db.commit()
     return {"status": "ok"}
 
 
 @app.post("/api/subtasks/{sub_id}/toggle")
-async def toggle_subtask(sub_id: int):
+async def toggle_subtask(sub_id: int, request: Request):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        cur = await db.execute("UPDATE subtasks SET done = 1 - done WHERE id = ?", (sub_id,))
+        cur = await db.execute("UPDATE subtasks SET done = 1 - done WHERE id = ? AND task_id IN (SELECT id FROM tasks WHERE user_id = ?)",
+                               (sub_id, uid))
         if cur.rowcount == 0: raise DomainError(404, "Подзадача не найдена")
         await db.commit()
     return {"status": "ok"}
 
 
 @app.delete("/api/subtasks/{sub_id}")
-async def delete_subtask(sub_id: int):
+async def delete_subtask(sub_id: int, request: Request):
+    uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        cur = await db.execute("DELETE FROM subtasks WHERE id = ?", (sub_id,))
+        cur = await db.execute("DELETE FROM subtasks WHERE id = ? AND task_id IN (SELECT id FROM tasks WHERE user_id = ?)",
+                               (sub_id, uid))
         if cur.rowcount == 0: raise DomainError(404, "Подзадача не найдена")
         await db.commit()
     return {"status": "ok"}
 
 
 # --- отчёты ---
-async def build_stats(d_from: str, d_to: str, today: str):
+async def build_stats(d_from: str, d_to: str, today: str, uid: int):
     start, end = parse_day(d_from, "Начало периода"), parse_day(d_to, "Конец периода")
     if end < start or (end - start).days > 400: raise DomainError(400, "Период от 1 до 400 дней")
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM tasks") as cur: rows = await cur.fetchall()
-        async with db.execute("SELECT day, category FROM completions WHERE day BETWEEN ? AND ?",
-                              (d_from, d_to)) as cur: comps = await cur.fetchall()
+        async with db.execute("SELECT * FROM tasks WHERE user_id = ?", (uid,)) as cur: rows = await cur.fetchall()
+        async with db.execute("SELECT day, category FROM completions WHERE day BETWEEN ? AND ? AND user_id = ?",
+                              (d_from, d_to, uid)) as cur: comps = await cur.fetchall()
     done_by = Counter(c["day"] for c in comps)
     cats = Counter(c["category"] for c in comps)
     days, cur_day = [], start
@@ -1811,14 +1859,15 @@ async def build_stats(d_from: str, d_to: str, today: str):
 
 
 @app.get("/api/stats")
-async def get_stats(today: str | None = None, date_from: str = Query(alias="from"), date_to: str = Query(alias="to")):
-    return await build_stats(date_from, date_to, client_today(today))
+async def get_stats(request: Request, today: str | None = None, date_from: str = Query(alias="from"), date_to: str = Query(alias="to")):
+    return await build_stats(date_from, date_to, client_today(today), await api_uid(request))
 
 
 @app.get("/api/stats/export")
-async def export_stats(today: str | None = None, date_from: str = Query(alias="from"), date_to: str = Query(alias="to")):
-    st = await build_stats(date_from, date_to, client_today(today))
-    path = REPORTS_DIR / f"report_{date_from}_{date_to}.csv"
+async def export_stats(request: Request, today: str | None = None, date_from: str = Query(alias="from"), date_to: str = Query(alias="to")):
+    uid = await api_uid(request)
+    st = await build_stats(date_from, date_to, client_today(today), uid)
+    path = REPORTS_DIR / f"report_{uid}_{date_from}_{date_to}.csv"  # у каждого пользователя свой файл
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
         w.writerow(["Дата", "Запланировано", "Выполнено"])
@@ -1996,6 +2045,12 @@ NOTIFY_MIGRATIONS = [
         "CREATE INDEX IF NOT EXISTS idx_nlog_task ON notification_log (task_id)",
         "CREATE INDEX IF NOT EXISTS idx_nlog_user_created ON notification_log (user_id, created_at)",
     ]),
+    ("notifications_002_task_owner", [
+        ("ADD_COLUMN", "tasks", "user_id", "INTEGER"),
+        ("ADD_COLUMN", "completions", "user_id", "INTEGER"),
+        "CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks (user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_completions_user_day ON completions (user_id, day)",
+    ]),
 ]
 
 
@@ -2007,7 +2062,7 @@ async def migrate_notifications(db):
         applied = {r[0] for r in await cur.fetchall()}
     pending = [m for m in NOTIFY_MIGRATIONS if m[0] not in applied]
     if not pending:
-        await db.commit()
+        await backfill_completion_owners(db)
         return
     try:
         src = Path(DB_NAME)
@@ -2019,7 +2074,14 @@ async def migrate_notifications(db):
     for mid, statements in pending:
         try:
             await db.execute("BEGIN")
-            for st in statements: await db.execute(st)
+            for st in statements:
+                if isinstance(st, tuple):  # ("ADD_COLUMN", таблица, колонка, тип) — только если колонки ещё нет
+                    _, table, col, ddl = st
+                    async with db.execute(f"PRAGMA table_info({table})") as cur:
+                        have = {r[1] for r in await cur.fetchall()}
+                    if col not in have: await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+                else:
+                    await db.execute(st)
             await db.execute("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)", (mid, iso(utcnow())))
             await db.commit()
         except Exception:
@@ -2037,6 +2099,25 @@ async def migrate_notifications(db):
         await db.commit()
         u = await load_user(db, chat)
         if u: await skip_past_digests(db, u, list(DIGESTS), utcnow())
+    async with db.execute("SELECT user_id FROM users ORDER BY created_at, user_id LIMIT 1") as cur:
+        first = await cur.fetchone()
+    if first: await adopt_orphans(db, first[0])
+    await backfill_completion_owners(db)
+
+
+async def adopt_orphans(db, user_id: int):
+    """Задачи, созданные до появления владельцев, достаются первому пользователю — раньше бот был одиночным."""
+    await db.execute("UPDATE tasks SET user_id = ? WHERE user_id IS NULL", (user_id,))
+    await db.execute("UPDATE completions SET user_id = ? WHERE user_id IS NULL "
+                     "AND task_id IN (SELECT id FROM tasks WHERE user_id = ?)", (user_id, user_id))
+    await db.commit()
+
+
+async def backfill_completion_owners(db):
+    """Отметки выполнения наследуют владельца задачи (записи удалённых задач остаются без владельца и в отчётах не видны)."""
+    await db.execute("UPDATE completions SET user_id = (SELECT t.user_id FROM tasks t WHERE t.id = completions.task_id) "
+                     "WHERE user_id IS NULL AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = completions.task_id AND t.user_id IS NOT NULL)")
+    await db.commit()
 
 
 # =====================================================================
@@ -2076,7 +2157,10 @@ async def ensure_user(db, user_id: int, chat_id: int, reactivate: bool = False) 
     await db.execute("INSERT OR IGNORE INTO notification_settings (user_id, updated_at) VALUES (?, ?)", (user_id, now))
     await db.commit()
     u = await load_user(db, user_id)
-    if created: await skip_past_digests(db, u, list(DIGESTS), utcnow())
+    if created:
+        await skip_past_digests(db, u, list(DIGESTS), utcnow())
+        async with db.execute("SELECT COUNT(*) FROM users") as cur:
+            if (await cur.fetchone())[0] == 1: await adopt_orphans(db, user_id)  # самый первый пользователь забирает старые задачи
     return u
 
 
@@ -2252,6 +2336,7 @@ def check_row(row, u: dict | None, task, now: datetime) -> tuple[bool, str]:
     if kind in ("remind", "snooze"):
         off = row["offset_min"]
         if not task: return False, "задача удалена"
+        if task["user_id"] != u["user_id"]: return False, "задача принадлежит другому пользователю"
         if task["remind_min"] == -1: return False, "для задачи отключены напоминания"
         if not task["due_time"]: return False, "у задачи нет времени"
         if kind == "remind":
@@ -2280,7 +2365,7 @@ def reminder_candidates(u: dict, tasks, now: datetime):
     tz = u["zone"]
     local = utc_to_local(now, tz)
     for r in tasks:
-        if not r["due_time"] or r["remind_min"] == -1: continue
+        if r["user_id"] != u["user_id"] or not r["due_time"] or r["remind_min"] == -1: continue
         for d in (local.date(), local.date() + timedelta(days=1)):
             day = d.isoformat()
             try:
@@ -2352,9 +2437,13 @@ async def _retry_or_fail(db, log_id: int, attempts: int, err: str, delay: int | 
                   next_attempt_at=iso(utcnow() + timedelta(seconds=wait)))
 
 
-async def fetch_task_row(db, task_id):
+async def fetch_task_row(db, task_id, uid: int | None = None):
+    """Строка задачи или None. uid задан — только если задача этого пользователя (для кнопок и API)."""
     if task_id is None: return None
-    async with db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)) as cur:
+    if uid is None:  # внутренние проверки доставки: владельца сверяет check_row
+        async with db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)) as cur:
+            return await cur.fetchone()
+    async with db.execute("SELECT * FROM tasks WHERE id = ? AND user_id = ?", (task_id, uid)) as cur:
         return await cur.fetchone()
 
 
@@ -2505,7 +2594,7 @@ def _digest_rows(tasks: list[dict], day: str) -> list:
 async def build_digest(db, kind: str, u: dict, today: str, refresh: bool = False):
     """Утренний план / вечерний итог / сводка просроченных. refresh=True — пересборка уже отправленного сообщения
     (вместо None возвращает «всё сделано»). Выполненные задачи в списках не показываются."""
-    tasks = await list_tasks(db, today, "today")
+    tasks = await list_tasks(db, today, "today", u["user_id"])
     d = date.fromisoformat(today)
     title_day = f"{d.day} {MONTHS_GEN[d.month - 1]}"
     open_all = [t for t in tasks if not t["completed"]]
@@ -2544,9 +2633,9 @@ async def build_digest(db, kind: str, u: dict, today: str, refresh: bool = False
         return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
     if kind == "evening":
-        async with db.execute("SELECT * FROM tasks") as cur: all_rows = await cur.fetchall()
+        async with db.execute("SELECT * FROM tasks WHERE user_id = ?", (u["user_id"],)) as cur: all_rows = await cur.fetchall()
         planned = sum(1 for r in all_rows if occurs(r, today))
-        async with db.execute("SELECT COUNT(*) FROM completions WHERE day = ?", (today,)) as cur:
+        async with db.execute("SELECT COUNT(*) FROM completions WHERE day = ? AND user_id = ?", (today, u["user_id"])) as cur:
             done = (await cur.fetchone())[0]
         total = max(planned, done)
         if total == 0 and not open_all and not refresh: return None
@@ -2569,12 +2658,12 @@ async def build_digest(db, kind: str, u: dict, today: str, refresh: bool = False
 # =====================================================================
 #  Действия из кнопок (общая логика для бота; приложение работает через обычные API задач)
 # =====================================================================
-async def push_unfinished_to_tomorrow_db(db, today: str, tomorrow: str) -> int:
+async def push_unfinished_to_tomorrow_db(db, today: str, tomorrow: str, uid: int) -> int:
     cur = await db.execute(
-        "UPDATE tasks SET planned_date = ?, reminded_on = NULL WHERE repeat_type = 'none' AND done_on IS NULL "
-        "AND COALESCE(planned_date, created_on, '2000-01-01') <= ?", (tomorrow, today))
+        "UPDATE tasks SET planned_date = ?, reminded_on = NULL WHERE repeat_type = 'none' AND done_on IS NULL AND user_id = ? "
+        "AND COALESCE(planned_date, created_on, '2000-01-01') <= ?", (tomorrow, uid, today))
     await db.commit()
-    if cur.rowcount: await task_changed(None)
+    if cur.rowcount: await task_changed(None, uid)
     return cur.rowcount
 
 
@@ -2582,7 +2671,7 @@ async def create_snooze(db, u: dict, task_id: int, day: str, minutes: int) -> No
     now = utcnow()
     fire = now + timedelta(minutes=minutes)
     ts = iso(now)
-    row = await fetch_task(db, task_id)
+    row = await fetch_task(db, task_id, u["user_id"])
     await db.execute(
         "INSERT OR IGNORE INTO notification_log (dedup_key, user_id, chat_id, kind, task_id, occ_day, task_time, title, fire_at, "
         "status, created_at, updated_at) VALUES (?, ?, ?, 'snooze', ?, ?, ?, ?, ?, 'pending', ?, ?)",
@@ -2598,26 +2687,27 @@ async def reminder_action(u: dict, action: str, task_id: int, day: str) -> tuple
     local = utc_to_local(now, u["zone"])
     today = local.date().isoformat()
     tomorrow = (local.date() + timedelta(days=1)).isoformat()
+    uid = u["user_id"]
     async with notif_db() as db:
         if action == "carry":
-            n = await carry_over_db(db, today)
+            n = await carry_over_db(db, today, uid)
             return (f"Перенесено на сегодня: {n}" if n else "Просроченных задач нет"), False
         if action == "alltom":
-            n = await push_unfinished_to_tomorrow_db(db, today, tomorrow)
+            n = await push_unfinished_to_tomorrow_db(db, today, tomorrow, uid)
             return (f"Перенесено на завтра: {n}" if n else "Переносить нечего"), False
-        row = await fetch_task(db, task_id)  # 404 → «Задача не найдена»
+        row = await fetch_task(db, task_id, uid)  # 404 → «Задача не найдена» (в том числе для чужой)
         if action == "ok":
             if row["repeat_type"] != "none" and day != today:
                 raise DomainError(400, f"Повтор запланирован на {short_date(day)} — отметить можно в этот день")
-            return ("Выполнено ✅", False) if await complete_task_db(db, task_id, today) else ("Уже выполнено ✅", False)
+            return ("Выполнено ✅", False) if await complete_task_db(db, task_id, today, uid) else ("Уже выполнено ✅", False)
         if action in ("p30", "p60"):
-            d, t = await shift_task_time_db(db, task_id, 30 if action == "p30" else 60, local)
+            d, t = await shift_task_time_db(db, task_id, 30 if action == "p30" else 60, local, uid)
             return f"Перенесено на {t}" + ("" if d == today else f" · {short_date(d)}"), False
         if action in ("tom", "td"):
             to = tomorrow if action == "tom" else today
             if row["done_on"] is not None and row["repeat_type"] == "none": raise DomainError(409, "Задача уже выполнена")
             if planned_of(row) == to: return ("Уже на завтра" if action == "tom" else "Уже на сегодня"), False
-            await move_task_db(db, task_id, to, today)
+            await move_task_db(db, task_id, to, today, uid)
             return ("Перенесено на завтра" if action == "tom" else "Перенесено на сегодня"), False
         if action in ("z30", "z60"):
             if row["repeat_type"] == "none": raise DomainError(400, "Для разовой задачи используйте перенос")
@@ -2660,14 +2750,14 @@ async def reminder_view(task, row, today: str):
     return None, None, "ok"
 
 
-async def refresh_messages(task_id: int | None):
+async def refresh_messages(task_id: int | None, uid: int):
     """Приводит отправленные сообщения в соответствие с БД после изменения задачи из приложения или бота:
     убирает кнопки у устаревших напоминаний и пересобирает сводки. Все ошибки гасятся — это best-effort."""
     try:
         async with notif_db() as db:
             cutoff = iso(utcnow() - KB_EDIT_WINDOW)
-            q = "SELECT * FROM notification_log WHERE status = 'sent' AND kb_active = 1 AND sent_at >= ? AND tg_message_id IS NOT NULL"
-            args = [cutoff]
+            q = "SELECT * FROM notification_log WHERE status = 'sent' AND kb_active = 1 AND sent_at >= ? AND tg_message_id IS NOT NULL AND user_id = ?"
+            args = [cutoff, uid]
             if task_id is not None:
                 q += " AND (task_id = ? OR task_id IS NULL)"
                 args.append(task_id)
@@ -2697,15 +2787,15 @@ async def refresh_messages(task_id: int | None):
         log.exception("Не удалось синхронизировать сообщения уведомлений")
 
 
-async def task_changed(task_id: int | None):
+async def task_changed(task_id: int | None, uid: int):
     """Хук для всех мест, где меняется задача (API и бот). Никогда не бросает исключений.
-    task_id=None — изменилось много задач сразу."""
+    task_id=None — изменилось много задач сразу. uid — владелец: чужие сообщения не трогаем."""
     try:
         async with notif_db() as db:
-            await cancel_invalid_pending(db, task_id=task_id)
+            await cancel_invalid_pending(db, user_id=uid, task_id=task_id)
     except Exception:
         log.exception("Не удалось пересчитать расписание уведомлений")
-    _spawn(refresh_messages(task_id))
+    _spawn(refresh_messages(task_id, uid))
 
 
 # =====================================================================
