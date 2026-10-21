@@ -1,21 +1,35 @@
 import asyncio
 import csv
 import difflib
+import hashlib
+import hmac
 import html
+import json
+import logging
 import math
 import os
 import re
+import shutil
+import time as _time
 from collections import Counter
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import parse_qsl
 from zoneinfo import ZoneInfo
 
 import aiosqlite
 import uvicorn
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -29,7 +43,7 @@ from aiogram.types import (
     CallbackQuery,
     WebAppInfo,
 )
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -282,6 +296,9 @@ class Editor(StatesGroup):
     e_date = State()
     e_time = State()
     p_date = State()
+    r_date = State()  # перенос задачи из напоминания на выбранную дату
+    n_time = State()  # время утреннего плана / вечернего итога / сводки просроченных
+    n_tz = State()  # часовой пояс
 
 
 # =====================================================================
@@ -371,6 +388,7 @@ async def init_db():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_habit_logs_day ON habit_logs (day)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_completions_day ON completions (day)")
         await db.commit()
+        await migrate_notifications(db)
 
 
 # =====================================================================
@@ -441,7 +459,9 @@ def clean_task(t: TaskCreate) -> dict:
     planned = parse_day(planned_raw, "Плановая дата").isoformat() if planned_raw else None
     due = parse_day(due_raw, "Срок").isoformat() if due_raw else None
     time = parse_time(t.time) if t.time else None
-    remind = t.remind if (time and t.remind is not None and t.remind >= 0) else None
+    # remind_min: NULL — напоминать по настройкам пользователя (за 30 и 10 минут), -1 — не напоминать об этой задаче.
+    # Прежние значения (0/10/60/1440) больше не используются и при сохранении сбрасываются в NULL.
+    remind = -1 if t.remind == -1 else None
     return dict(text=text, priority=int(level == 3), level=level, repeat=t.repeat, planned=planned, due=due,
                 time=time, remind=remind, category=t.category.strip(), note=t.note.strip())
 
@@ -520,6 +540,7 @@ async def update_task(db, task_id: int, task: TaskCreate):
         (v["text"], v["priority"], v["level"], v["repeat"], planned, v["due"], v["time"], v["remind"],
          v["category"], v["note"], task_id))
     await db.commit()
+    await task_changed(task_id)  # время/повтор/дата могли измениться — пересчитать расписание напоминаний
 
 
 async def toggle_task_db(db, task_id: int, today: str):
@@ -534,6 +555,19 @@ async def toggle_task_db(db, task_id: int, today: str):
                          (task_id, today, cat))
         await db.execute("UPDATE tasks SET done_on = ? WHERE id = ?", (today, task_id))
     await db.commit()
+    await task_changed(task_id)
+
+
+async def complete_task_db(db, task_id: int, today: str) -> bool:
+    """Идемпотентное «Выполнено» (в отличие от toggle не снимает отметку). True — отметили сейчас, False — уже была."""
+    row = await fetch_task(db, task_id)
+    if is_done(row, today): return False
+    await db.execute("INSERT OR IGNORE INTO completions (task_id, day, category) VALUES (?, ?, ?)",
+                     (task_id, today, row["category"]))
+    await db.execute("UPDATE tasks SET done_on = ? WHERE id = ?", (today, task_id))
+    await db.commit()
+    await task_changed(task_id)
+    return True
 
 
 async def move_task_db(db, task_id: int, to: str, today: str) -> str:
@@ -553,7 +587,30 @@ async def move_task_db(db, task_id: int, to: str, today: str) -> str:
     if iso != planned_of(row):
         await db.execute("UPDATE tasks SET planned_date = ?, reminded_on = NULL WHERE id = ?", (iso, task_id))
         await db.commit()
+        await task_changed(task_id)
     return iso
+
+
+async def shift_task_time_db(db, task_id: int, minutes: int, now: datetime) -> tuple[str, str]:
+    """Сдвиг разовой задачи со временем на N минут. Отсчёт от большего из «время задачи» и «сейчас» (пользовательское
+    локальное время), чтобы просроченную задачу не переносить в прошлое. Меняет плановую дату и время."""
+    row = await fetch_task(db, task_id)
+    if row["repeat_type"] != "none":
+        raise DomainError(400, "Повторяющуюся задачу перенести нельзя — она появляется по расписанию")
+    if row["done_on"] is not None:
+        raise DomainError(409, "Задача уже выполнена — переносить нечего")
+    if not row["due_time"]:
+        raise DomainError(400, "У задачи нет времени — перенесите её на другую дату")
+    if not 0 < minutes <= 24 * 60:
+        raise DomainError(400, "Некорректный сдвиг времени")
+    start = datetime.fromisoformat(f"{planned_of(row)}T{row['due_time']}")
+    new = max(start, now.replace(second=0, microsecond=0)) + timedelta(minutes=minutes)
+    if (new.date() - now.date()).days > MAX_PLAN_AHEAD_DAYS: raise DomainError(400, "Слишком далёкая дата переноса")
+    await db.execute("UPDATE tasks SET planned_date = ?, due_time = ?, reminded_on = NULL WHERE id = ?",
+                     (new.date().isoformat(), new.strftime("%H:%M"), task_id))
+    await db.commit()
+    await task_changed(task_id)
+    return new.date().isoformat(), new.strftime("%H:%M")
 
 
 async def carry_over_db(db, today: str) -> int:
@@ -562,6 +619,7 @@ async def carry_over_db(db, today: str) -> int:
         "UPDATE tasks SET planned_date = ?1, reminded_on = NULL WHERE repeat_type = 'none' AND done_on IS NULL "
         "AND COALESCE(planned_date, created_on, '2000-01-01') < ?1", (today,))
     await db.commit()
+    if cur.rowcount: await task_changed(None)
     return cur.rowcount
 
 
@@ -571,6 +629,7 @@ async def set_task_due(db, task_id: int, value: str | None):
     check_series(row["repeat_type"], planned_of(row), due)
     await db.execute("UPDATE tasks SET due_date = ?, reminded_on = NULL WHERE id = ?", (due, task_id))
     await db.commit()
+    await task_changed(task_id)
 
 
 # =====================================================================
@@ -685,7 +744,7 @@ def main_menu_kb():
             [KeyboardButton(text="📋 План")],
             [KeyboardButton(text="📝 Задачи"), KeyboardButton(text="🎯 Цели")],
             [KeyboardButton(text="📅 События"), KeyboardButton(text="🌱 Привычки")],
-            [KeyboardButton(text="📊 Отчет активности")]
+            [KeyboardButton(text="📊 Отчет активности"), KeyboardButton(text="🔔 Уведомления")]
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие ниже..."
@@ -848,6 +907,7 @@ async def cmd_start(message: Message, state: FSMContext):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('chat_id', ?)", (str(message.chat.id),))
         await db.commit()
+    await register_user(message.from_user.id if message.from_user else message.chat.id, message.chat.id)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Начать планировать", callback_data="start_planning")]
@@ -1088,6 +1148,7 @@ async def cq_t_rep(cq: CallbackQuery):
                 nxt = {"none": "daily", "daily": "weekdays", "weekdays": "none"}[r[0]]
                 await db.execute("UPDATE tasks SET repeat_type = ? WHERE id = ?", (nxt, task_id))
                 await db.commit()
+    await task_changed(task_id)
     await cq.message.edit_text(await get_task_text(task_id), reply_markup=task_kb(task_id), parse_mode=ParseMode.HTML)
     await cq.answer()
 
@@ -1232,8 +1293,9 @@ async def process_t_time(message: Message, state: FSMContext):
         await state.clear()
         return
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE tasks SET due_time = ?, remind_min = 0, reminded_on = NULL WHERE id = ?", (t, data['id']))
+        await db.execute("UPDATE tasks SET due_time = ?, reminded_on = NULL WHERE id = ?", (t, data['id']))
         await db.commit()
+    await task_changed(data['id'])
     await finish_edit(message, state, 'task', data['id'])
 
 
@@ -1307,6 +1369,252 @@ async def process_e_time(message: Message, state: FSMContext):
         await db.execute("UPDATE events SET time = ? WHERE id = ?", (t, data['id']))
         await db.commit()
     await finish_edit(message, state, 'event', data['id'])
+
+
+# =====================================================================
+#  TELEGRAM: кнопки напоминаний и настройки уведомлений
+# =====================================================================
+async def bot_user(from_user_id: int, chat_id: int) -> dict:
+    async with notif_db() as db:
+        return await load_user(db, from_user_id) or await ensure_user(db, from_user_id, chat_id)
+
+
+async def log_row_for_message(chat_id: int, message_id: int):
+    async with notif_db() as db:
+        async with db.execute("SELECT * FROM notification_log WHERE chat_id = ? AND tg_message_id = ? AND status = 'sent'",
+                              (chat_id, message_id)) as cur:
+            return await cur.fetchone()
+
+
+async def deactivate_kb(chat_id: int, message_id: int):
+    try:
+        async with notif_db() as db:
+            await db.execute("UPDATE notification_log SET kb_active = 0, updated_at = ? WHERE chat_id = ? AND tg_message_id = ?",
+                             (iso(utcnow()), chat_id, message_id))
+            await db.commit()
+    except Exception:
+        log.exception("Не удалось снять отметку клавиатуры")
+
+
+# --- кнопки под напоминаниями и сводками ---
+@dp.callback_query(F.data.startswith("rm_"))
+async def cq_reminder(cq: CallbackQuery, state: FSMContext):
+    try:
+        action, tid, day = cq.data[3:].split(":", 2)
+        task_id = int(tid)
+    except ValueError:
+        return await cq.answer()
+    chat_id, msg_id = cq.message.chat.id, cq.message.message_id
+    try:
+        u = await bot_user(cq.from_user.id, chat_id)
+        today = utc_to_local(utcnow(), u["zone"]).date().isoformat()
+
+        if action in ("mv", "bk"):
+            async with notif_db() as db:
+                task = await fetch_task_row(db, task_id)
+            if not task or (task["repeat_type"] == "none" and task["done_on"] is not None):
+                await refresh_messages(task_id)
+                return await cq.answer("Задача уже выполнена или удалена", show_alert=True)
+            if action == "mv":
+                await cq.message.edit_reply_markup(reply_markup=move_menu_kb(task, day, today))
+            else:
+                row = await log_row_for_message(chat_id, msg_id)
+                if row and row["kind"] in ("remind", "snooze"):
+                    await cq.message.edit_reply_markup(reply_markup=reminder_kb(task_id, day))
+                else:
+                    await refresh_messages(task_id)  # сводку пересобираем целиком — вернётся список кнопок
+            return await cq.answer()
+
+        if action == "dt":
+            await init_edit_state(cq, state, Editor.r_date, "На какую дату перенести? Например: 25.10, 2026-10-25, завтра")
+            await state.update_data(day=day)
+            return
+
+        toast, alert = await reminder_action(u, action, task_id, day)
+        await flush_background()  # изменения уже отправили обновление всех связанных сообщений
+        if action in ("z30", "z60"):
+            async with notif_db() as db:
+                task = await fetch_task_row(db, task_id)
+            minutes = 30 if action == "z30" else 60
+            await safe_edit(chat_id, msg_id, f"🔕 <b>{html.escape(task['text'])}</b> — напомню через {ru_minutes(minutes)}", None)
+            await deactivate_kb(chat_id, msg_id)
+        await cq.answer(toast, show_alert=alert)
+    except DomainError as e:
+        if e.status == 404: await refresh_messages(task_id)
+        await cq.answer(e.message, show_alert=True)
+    except Exception:
+        log.exception("Ошибка обработки кнопки напоминания %s", cq.data)
+        try:
+            await cq.answer("Не получилось, попробуйте ещё раз", show_alert=True)
+        except Exception:
+            pass
+
+
+@dp.message(Editor.r_date)
+async def process_r_date(message: Message, state: FSMContext):
+    data = await state.get_data()
+    try:
+        u = await bot_user(message.from_user.id, message.chat.id)
+        today = utc_to_local(utcnow(), u["zone"]).date().isoformat()
+        to = parse_user_date(message.text, today)
+        async with notif_db() as db:
+            await move_task_db(db, data["id"], to, today)
+    except DomainError as e:
+        await message.answer(f"⚠️ {e.message}. Введите дату ещё раз (например 25.10) или нажмите кнопку меню:")
+        return
+    except Exception:
+        log.exception("Не удалось перенести задачу из напоминания")
+        await message.answer("⚠️ Не получилось перенести задачу, попробуйте ещё раз позже.")
+        await state.clear()
+        return
+    await flush_background()
+    try:
+        await message.delete()
+        if "prompt_id" in data: await bot.delete_message(chat_id=message.chat.id, message_id=data["prompt_id"])
+    except Exception:
+        pass
+    await state.clear()
+
+
+# --- настройки уведомлений в боте (те же данные, что и в приложении) ---
+def settings_text(u: dict) -> str:
+    s = u["s"]
+    m = lambda v: "✅" if v else "⬜"
+    return "\n".join([
+        "🔔 <b>Уведомления</b>", "",
+        f"🌍 Часовой пояс: <b>{html.escape(u['tz'])}</b>{' (определяется автоматически)' if u['tz_auto'] else ''}", "",
+        f"{m(s['enabled'])} Все уведомления",
+        f"{m(s['remind_30'])} За 30 минут до задачи",
+        f"{m(s['remind_10'])} За 10 минут до задачи",
+        f"{m(s['morning_on'])} Утренний план — {s['morning_time']}",
+        f"{m(s['evening_on'])} Вечерний итог — {s['evening_time']}",
+        f"{m(s['overdue_on'])} Сводка просроченных — {s['overdue_time']}", "",
+        "<i>Те же настройки доступны в приложении, раздел «Уведомления».</i>"])
+
+
+def settings_kb(u: dict) -> InlineKeyboardMarkup:
+    s = u["s"]
+    m = lambda v: "✅" if v else "⬜"
+    B = InlineKeyboardButton
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [B(text=f"{m(s['enabled'])} Все", callback_data="nt:enabled")],
+        [B(text=f"{m(s['remind_30'])} За 30 мин", callback_data="nt:remind_30"),
+         B(text=f"{m(s['remind_10'])} За 10 мин", callback_data="nt:remind_10")],
+        [B(text=f"{m(s['morning_on'])} Утро", callback_data="nt:morning_on"),
+         B(text=f"🕔 {s['morning_time']}", callback_data="ntm:morning")],
+        [B(text=f"{m(s['evening_on'])} Вечер", callback_data="nt:evening_on"),
+         B(text=f"🕗 {s['evening_time']}", callback_data="ntm:evening")],
+        [B(text=f"{m(s['overdue_on'])} Просрочено", callback_data="nt:overdue_on"),
+         B(text=f"🕘 {s['overdue_time']}", callback_data="ntm:overdue")],
+        [B(text="🌍 Часовой пояс", callback_data="ntz")],
+        [B(text="Закрыть", callback_data="close_kb")],
+    ])
+
+
+async def show_settings(target_message: Message | None = None, chat_id: int | None = None, message_id: int | None = None,
+                        user_id: int | None = None):
+    u = await bot_user(user_id, chat_id or target_message.chat.id)
+    if target_message is not None and message_id is None:
+        await target_message.answer(settings_text(u), reply_markup=settings_kb(u), parse_mode=ParseMode.HTML)
+    else:
+        await safe_edit(chat_id, message_id, settings_text(u), settings_kb(u))
+
+
+@dp.message(Command("notify"))
+@dp.message(F.text == "🔔 Уведомления")
+async def btn_notify(message: Message, state: FSMContext):
+    await state.clear()
+    try:
+        await show_settings(target_message=message, user_id=message.from_user.id)
+    except Exception:
+        log.exception("Не удалось показать настройки уведомлений")
+        await message.answer("⚠️ Не удалось загрузить настройки, попробуйте позже.")
+
+
+@dp.callback_query(F.data.startswith("nt:"))
+async def cq_nt_toggle(cq: CallbackQuery):
+    key = cq.data[3:]
+    try:
+        u = await bot_user(cq.from_user.id, cq.message.chat.id)
+        if key not in BOOL_KEYS and key != "tz_auto": return await cq.answer()
+        cur = u["tz_auto"] if key == "tz_auto" else u["s"][key]
+        await update_notification_settings(u["user_id"], {key: 0 if cur else 1})
+        await show_settings(chat_id=cq.message.chat.id, message_id=cq.message.message_id, user_id=cq.from_user.id)
+        await cq.answer("Сохранено")
+    except DomainError as e:
+        await cq.answer(e.message, show_alert=True)
+    except Exception:
+        log.exception("Не удалось сохранить настройку %s", key)
+        await cq.answer("Не удалось сохранить, попробуйте ещё раз", show_alert=True)
+
+
+NOTIFY_PROMPTS = {"morning": "утренний план", "evening": "вечерний итог", "overdue": "сводку просроченных"}
+
+
+@dp.callback_query(F.data.startswith("ntm:"))
+async def cq_nt_time(cq: CallbackQuery, state: FSMContext):
+    kind = cq.data[4:]
+    if kind not in DIGESTS: return await cq.answer()
+    await state.set_state(Editor.n_time)
+    msg = await cq.message.answer(f"<i>Во сколько присылать {NOTIFY_PROMPTS[kind]}? Формат ЧЧ:ММ, например 05:00</i>",
+                                  parse_mode=ParseMode.HTML)
+    await state.update_data(kind=kind, msg_id=cq.message.message_id, prompt_id=msg.message_id)
+    await cq.answer()
+
+
+@dp.callback_query(F.data == "ntz")
+async def cq_nt_tz(cq: CallbackQuery, state: FSMContext):
+    await state.set_state(Editor.n_tz)
+    msg = await cq.message.answer("<i>Введите часовой пояс, например Europe/Moscow или Asia/Yekaterinburg. "
+                                  "«авто» — определять по устройству в приложении.</i>", parse_mode=ParseMode.HTML)
+    await state.update_data(msg_id=cq.message.message_id, prompt_id=msg.message_id)
+    await cq.answer()
+
+
+async def _finish_settings_input(message: Message, state: FSMContext, data: dict):
+    try:
+        await message.delete()
+        if "prompt_id" in data: await bot.delete_message(chat_id=message.chat.id, message_id=data["prompt_id"])
+    except Exception:
+        pass
+    await state.clear()
+    await show_settings(chat_id=message.chat.id, message_id=data["msg_id"], user_id=message.from_user.id)
+
+
+@dp.message(Editor.n_time)
+async def process_n_time(message: Message, state: FSMContext):
+    data = await state.get_data()
+    try:
+        u = await bot_user(message.from_user.id, message.chat.id)
+        await update_notification_settings(u["user_id"], {f"{data['kind']}_time": (message.text or "").strip()})
+    except DomainError as e:
+        await message.answer(f"⚠️ {e.message}. Введите время ещё раз (например 05:00) или нажмите кнопку меню:")
+        return
+    except Exception:
+        log.exception("Не удалось сохранить время уведомления")
+        await message.answer("⚠️ Не удалось сохранить, попробуйте позже.")
+        await state.clear()
+        return
+    await _finish_settings_input(message, state, data)
+
+
+@dp.message(Editor.n_tz)
+async def process_n_tz(message: Message, state: FSMContext):
+    data = await state.get_data()
+    raw = (message.text or "").strip()
+    try:
+        u = await bot_user(message.from_user.id, message.chat.id)
+        patch = {"tz_auto": 1} if raw.lower() in ("авто", "auto") else {"tz": raw}
+        await update_notification_settings(u["user_id"], patch)
+    except DomainError as e:
+        await message.answer(f"⚠️ {e.message}. Введите пояс ещё раз или нажмите кнопку меню:")
+        return
+    except Exception:
+        log.exception("Не удалось сохранить часовой пояс")
+        await message.answer("⚠️ Не удалось сохранить, попробуйте позже.")
+        await state.clear()
+        return
+    await _finish_settings_input(message, state, data)
 
 
 # Быстрое добавление: З "название" В/С/Н завтра. Регистрируется последним и только вне режимов ввода,
@@ -1447,6 +1755,7 @@ async def delete_task(task_id: int):
         await db.execute("DELETE FROM subtasks WHERE task_id = ?", (task_id,))
         await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))  # история в completions остаётся для отчётов
         await db.commit()
+    await task_changed(task_id)
     return {"status": "ok"}
 
 
@@ -1520,40 +1829,1033 @@ async def export_stats(today: str | None = None, date_from: str = Query(alias="f
     return {"status": "ok", "path": str(path.resolve())}
 
 
-# --- напоминания ---
-async def check_reminders():
-    now = now_local()
-    today = now.date().isoformat()
-    async with aiosqlite.connect(DB_NAME) as db:
+# =====================================================================
+#  УВЕДОМЛЕНИЯ: настройки, расписание, доставка, синхронизация сообщений
+# =====================================================================
+# Как это устроено:
+#  * Расписание не хранится «вперёд» — оно ВЫЧИСЛЯЕТСЯ из текущего состояния задач и настроек каждые
+#    NOTIFY_TICK_SECONDS. Поэтому перенос/правка времени/смена часового пояса применяются сами, а после
+#    перезапуска ничего «восстанавливать» отдельно не нужно: состояние целиком лежит в SQLite.
+#  * notification_log — журнал отправок и одновременно защита от дублей: dedup_key UNIQUE.
+#    Ключ включает пользователя, задачу, ДАТУ ПОВТОРА, ВРЕМЯ задачи и отступ (30/10), поэтому после переноса
+#    ключ новый и старая отправка ничего не блокирует; а повторную отправку того же самого ключ исключает.
+#  * Перед КАЖДОЙ отправкой (в том числе повторной) вызывается check_row — одна функция проверки актуальности
+#    (дата, время, статус задачи, настройки пользователя). Её же использует генератор кандидатов.
+log = logging.getLogger("myday.notify")
+
+NOTIFY_TICK_SECONDS = 20  # шаг планировщика: напоминание приходит с задержкой не больше этого значения
+REMIND_OFFSETS = (30, 10)  # за сколько минут до начала напоминать
+DIGEST_GRACE = timedelta(hours=3)  # сколько после назначенного времени ещё можно отправить сводку (после простоя)
+MAX_SEND_ATTEMPTS = 5
+RETRY_DELAYS = (30, 60, 120, 300)  # секунды до следующей попытки; последняя повторяется
+STUCK_SENDING_AFTER = timedelta(minutes=5)
+HISTORY_KEEP_DAYS = 90
+KB_EDIT_WINDOW = timedelta(hours=46)  # Telegram не позволяет править сообщения старше 48 часов
+INIT_DATA_MAX_AGE = 7 * 24 * 3600
+# 1 — без initData API работает с «основным» пользователем (как раньше, без авторизации); 0 — только из Telegram
+ALLOW_NO_AUTH = os.getenv("ALLOW_NO_AUTH", "1") != "0"
+
+DEFAULT_SETTINGS = {
+    "enabled": 1, "remind_30": 1, "remind_10": 1,
+    "morning_on": 1, "morning_time": "05:00",
+    "evening_on": 1, "evening_time": "20:00",
+    "overdue_on": 1, "overdue_time": "09:00",
+}
+BOOL_KEYS = ("enabled", "remind_30", "remind_10", "morning_on", "evening_on", "overdue_on")
+TIME_KEYS = ("morning_time", "evening_time", "overdue_time")
+SETTING_KEYS = tuple(DEFAULT_SETTINGS)
+DIGESTS = {"morning": ("morning_on", "morning_time"),
+           "evening": ("evening_on", "evening_time"),
+           "overdue": ("overdue_on", "overdue_time")}
+KIND_LABELS = {"remind": "Напоминание", "snooze": "Отложенное напоминание", "morning": "Утренний план",
+               "evening": "Вечерний итог", "overdue": "Просроченные", "test": "Тест"}
+
+_tick_state: dict = {"loop": None, "lock": None}
+_bg: set = set()
+
+
+def _tick_lock_get() -> asyncio.Lock:
+    """Один тик за раз. Замок создаётся под текущий event loop (безопасно при перезапуске цикла)."""
+    loop = asyncio.get_running_loop()
+    if _tick_state["loop"] is not loop:
+        _tick_state.update(loop=loop, lock=asyncio.Lock())
+    return _tick_state["lock"]
+
+
+# --- время: все моменты в журнале — UTC без tzinfo, строкой ISO; «локальное» — по поясу пользователя ---
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def zone(name: str | None):
+    """ZoneInfo по имени; если базы часовых поясов нет — как и везде в проекте, время сервера (None)."""
+    try:
+        return ZoneInfo(name) if name else LOCAL_TZ
+    except Exception:
+        return LOCAL_TZ
+
+
+def utc_to_local(u: datetime, tz) -> datetime:
+    aware = u.replace(tzinfo=timezone.utc)
+    return (aware.astimezone(tz) if tz else aware.astimezone()).replace(tzinfo=None)
+
+
+def local_to_utc(l: datetime, tz) -> datetime:
+    aware = l.replace(tzinfo=tz) if tz else l  # naive трактуется как локальное время сервера
+    return aware.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def at_clock(day: date, hhmm: str) -> datetime:
+    h, m = hhmm.split(":")
+    return datetime.combine(day, dtime(int(h), int(m)))
+
+
+def ru_minutes(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11: return f"{n} минуту"
+    if n % 10 in (2, 3, 4) and not 11 <= n % 100 <= 14: return f"{n} минуты"
+    return f"{n} минут"
+
+
+def _spawn(coro):
+    """Фоновая задача с удержанием ссылки и логированием ошибок (ничто не должно падать молча или рушить приложение)."""
+    t = asyncio.ensure_future(coro)
+    _bg.add(t)
+
+    def _done(f):
+        _bg.discard(f)
+        if not f.cancelled() and f.exception():
+            log.error("Фоновая задача уведомлений упала: %r", f.exception())
+
+    t.add_done_callback(_done)
+    return t
+
+
+async def flush_background():
+    if _bg: await asyncio.gather(*list(_bg), return_exceptions=True)
+
+
+@asynccontextmanager
+async def notif_db():
+    async with aiosqlite.connect(DB_NAME, timeout=15) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT value FROM settings WHERE key = 'chat_id'") as cur:
-            chat = await cur.fetchone()
-        if not chat: return
-        async with db.execute("SELECT * FROM tasks WHERE due_time IS NOT NULL AND remind_min IS NOT NULL") as cur:
-            rows = await cur.fetchall()
-        for r in rows:
-            one_off = r["repeat_type"] == "none"
-            day = planned_of(r) if one_off else today
-            if not one_off and not occurs(r, today): continue
-            if r["reminded_on"] == day or is_done(r, today): continue
-            due = datetime.fromisoformat(f"{day}T{r['due_time']}")
-            if due - timedelta(minutes=r["remind_min"]) <= now < due + timedelta(hours=1):
-                await bot.send_message(int(chat["value"]),
-                                       f"⏰ <b>Напоминание:</b> {html.escape(r['text'])} — в {r['due_time']}",
-                                       parse_mode=ParseMode.HTML)
-                await db.execute("UPDATE tasks SET reminded_on = ? WHERE id = ?", (day, r["id"]))
+        await db.execute("PRAGMA busy_timeout = 15000")
+        yield db
+
+
+# =====================================================================
+#  Миграции (идемпотентные, без потери данных)
+# =====================================================================
+NOTIFY_MIGRATIONS = [
+    ("notifications_001_users_settings_log", [
+        """CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            tz TEXT NOT NULL,
+            tz_auto INTEGER NOT NULL DEFAULT 1,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS notification_settings (
+            user_id INTEGER PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            remind_30 INTEGER NOT NULL DEFAULT 1,
+            remind_10 INTEGER NOT NULL DEFAULT 1,
+            morning_on INTEGER NOT NULL DEFAULT 1,
+            morning_time TEXT NOT NULL DEFAULT '05:00',
+            evening_on INTEGER NOT NULL DEFAULT 1,
+            evening_time TEXT NOT NULL DEFAULT '20:00',
+            overdue_on INTEGER NOT NULL DEFAULT 1,
+            overdue_time TEXT NOT NULL DEFAULT '09:00',
+            updated_at TEXT NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS notification_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dedup_key TEXT NOT NULL UNIQUE,
+            user_id INTEGER NOT NULL,
+            chat_id INTEGER,
+            kind TEXT NOT NULL,
+            task_id INTEGER,
+            occ_day TEXT,
+            task_time TEXT,
+            offset_min INTEGER,
+            title TEXT,
+            fire_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT,
+            tg_message_id INTEGER,
+            kb_active INTEGER NOT NULL DEFAULT 0,
+            detail TEXT,
+            created_at TEXT NOT NULL,
+            sent_at TEXT,
+            updated_at TEXT NOT NULL)""",
+        "CREATE INDEX IF NOT EXISTS idx_nlog_status_fire ON notification_log (status, fire_at)",
+        "CREATE INDEX IF NOT EXISTS idx_nlog_task ON notification_log (task_id)",
+        "CREATE INDEX IF NOT EXISTS idx_nlog_user_created ON notification_log (user_id, created_at)",
+    ]),
+]
+
+
+async def migrate_notifications(db):
+    """Применяет только ещё не применённые миграции, каждую в одной транзакции. Перед первой — копия файла БД."""
+    db.row_factory = aiosqlite.Row
+    await db.execute("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+    async with db.execute("SELECT id FROM schema_migrations") as cur:
+        applied = {r[0] for r in await cur.fetchall()}
+    pending = [m for m in NOTIFY_MIGRATIONS if m[0] not in applied]
+    if not pending:
+        await db.commit()
+        return
+    try:
+        src = Path(DB_NAME)
+        bak = Path(str(DB_NAME) + ".before-notifications.bak")
+        if src.exists() and src.stat().st_size > 0 and not bak.exists():
+            shutil.copy2(src, bak)
+    except Exception as e:  # копия — страховка, её отсутствие не повод ронять запуск
+        log.warning("Не удалось сделать резервную копию БД перед миграцией: %r", e)
+    for mid, statements in pending:
+        try:
+            await db.execute("BEGIN")
+            for st in statements: await db.execute(st)
+            await db.execute("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)", (mid, iso(utcnow())))
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+    # Прежняя схема хранила единственный chat_id в settings — делаем из него первого пользователя
+    async with db.execute("SELECT value FROM settings WHERE key = 'chat_id'") as cur:
+        row = await cur.fetchone()
+    if row and str(row[0]).lstrip("-").isdigit():
+        chat = int(row[0])
+        now = iso(utcnow())
+        await db.execute("INSERT OR IGNORE INTO users (user_id, chat_id, tz, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                         (chat, chat, TZ_NAME, now, now))
+        await db.execute("INSERT OR IGNORE INTO notification_settings (user_id, updated_at) VALUES (?, ?)", (chat, now))
+        await db.commit()
+        u = await load_user(db, chat)
+        if u: await skip_past_digests(db, u, list(DIGESTS), utcnow())
+
+
+# =====================================================================
+#  Пользователи и настройки (общие для приложения и бота)
+# =====================================================================
+async def load_user(db, user_id: int) -> dict | None:
+    cols = ", ".join(f"s.{k}" for k in SETTING_KEYS)
+    async with db.execute(
+            f"SELECT u.user_id, u.chat_id, u.tz, u.tz_auto, u.active, {cols} FROM users u "
+            "JOIN notification_settings s ON s.user_id = u.user_id WHERE u.user_id = ?", (user_id,)) as cur:
+        r = await cur.fetchone()
+    return _user_from_row(r) if r else None
+
+
+def _user_from_row(r) -> dict:
+    d = dict(r)
+    return {"user_id": d["user_id"], "chat_id": d["chat_id"], "tz": d["tz"], "tz_auto": d["tz_auto"],
+            "active": d["active"], "zone": zone(d["tz"]), "s": {k: d[k] for k in SETTING_KEYS}}
+
+
+async def load_active_users(db) -> list[dict]:
+    cols = ", ".join(f"s.{k}" for k in SETTING_KEYS)
+    async with db.execute(
+            f"SELECT u.user_id, u.chat_id, u.tz, u.tz_auto, u.active, {cols} FROM users u "
+            "JOIN notification_settings s ON s.user_id = u.user_id WHERE u.active = 1") as cur:
+        return [_user_from_row(r) for r in await cur.fetchall()]
+
+
+async def ensure_user(db, user_id: int, chat_id: int, reactivate: bool = False) -> dict:
+    now = iso(utcnow())
+    cur = await db.execute("INSERT OR IGNORE INTO users (user_id, chat_id, tz, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                           (user_id, chat_id, TZ_NAME, now, now))
+    created = cur.rowcount == 1
+    if not created and (reactivate or chat_id):
+        await db.execute("UPDATE users SET chat_id = ?, active = CASE WHEN ? THEN 1 ELSE active END, updated_at = ? "
+                         "WHERE user_id = ?", (chat_id, int(reactivate), now, user_id))
+    await db.execute("INSERT OR IGNORE INTO notification_settings (user_id, updated_at) VALUES (?, ?)", (user_id, now))
+    await db.commit()
+    u = await load_user(db, user_id)
+    if created: await skip_past_digests(db, u, list(DIGESTS), utcnow())
+    return u
+
+
+async def register_user(user_id: int, chat_id: int):
+    """Вызывается из /start. Ошибки БД не должны мешать боту отвечать."""
+    try:
+        async with notif_db() as db:
+            await ensure_user(db, user_id, chat_id, reactivate=True)
+    except Exception:
+        log.exception("Не удалось зарегистрировать пользователя %s для уведомлений", user_id)
+
+
+def settings_view(u: dict) -> dict:
+    out = {k: bool(u["s"][k]) for k in BOOL_KEYS}
+    out.update({k: u["s"][k] for k in TIME_KEYS})
+    out.update({"tz": u["tz"], "tz_auto": bool(u["tz_auto"])})
+    return out
+
+
+def validate_settings_patch(patch: dict) -> dict:
+    clean = {}
+    for k, v in patch.items():
+        if k in BOOL_KEYS or k == "tz_auto":
+            if not isinstance(v, (bool, int)) or v not in (0, 1, True, False):
+                raise DomainError(400, f"{k}: ожидается да/нет")
+            clean[k] = int(bool(v))
+        elif k in TIME_KEYS:
+            clean[k] = parse_time(v, "Время")
+        elif k == "tz":
+            name = str(v).strip()
+            try:
+                ZoneInfo(name)
+            except Exception:
+                raise DomainError(400, "Неизвестный часовой пояс. Пример: Europe/Moscow, Asia/Yekaterinburg")
+            clean[k] = name
+        else:
+            raise DomainError(400, f"Неизвестная настройка: {k}")
+    if "tz" in clean and "tz_auto" not in clean:
+        clean["tz_auto"] = 0  # выбрал вручную — больше не подменяем поясом устройства
+    return clean
+
+
+async def update_notification_settings(user_id: int, patch: dict) -> dict:
+    clean = validate_settings_patch(patch)
+    async with notif_db() as db:
+        old = await load_user(db, user_id)
+        if not old: raise DomainError(404, "Пользователь не найден — нажмите /start в боте")
+        now = iso(utcnow())
+        sets = {k: v for k, v in clean.items() if k in SETTING_KEYS}
+        if sets:
+            await db.execute("UPDATE notification_settings SET " + ", ".join(f"{k} = ?" for k in sets) + ", updated_at = ? "
+                             "WHERE user_id = ?", (*sets.values(), now, user_id))
+        usets = {k: v for k, v in clean.items() if k in ("tz", "tz_auto")}
+        if usets:
+            await db.execute("UPDATE users SET " + ", ".join(f"{k} = ?" for k in usets) + ", updated_at = ? WHERE user_id = ?",
+                             (*usets.values(), now, user_id))
+        await db.commit()
+        new = await load_user(db, user_id)
+        await reschedule_user(db, old, new)
+    return settings_view(new)
+
+
+async def reschedule_user(db, old: dict, new: dict):
+    """Пересчёт после смены настроек: отменяем ставшие неактуальными ожидающие отправки и заново оцениваем
+    сегодняшние сводки (чтобы ни старая отправка, ни «пропуск» не блокировали новое время)."""
+    changed = {k for k in SETTING_KEYS if old["s"][k] != new["s"][k]}
+    if old["tz"] != new["tz"]: changed.add("tz")
+    await cancel_invalid_pending(db, user_id=new["user_id"])
+    now = utcnow()
+    today = utc_to_local(now, new["zone"]).date()
+    touched = [k for k, (on_k, time_k) in DIGESTS.items() if changed & {on_k, time_k, "tz", "enabled"}]
+    for kind in touched:
+        await db.execute("DELETE FROM notification_log WHERE dedup_key = ? AND status IN ('skipped', 'cancelled')",
+                         (digest_key(kind, new["user_id"], today.isoformat()),))
+    await db.commit()
+    if touched: await skip_past_digests(db, new, touched, now)
+
+
+def digest_key(kind: str, user_id: int, day: str) -> str:
+    return f"{kind}:{user_id}:{day}"
+
+
+async def skip_past_digests(db, u: dict, kinds: list, now: datetime):
+    """Сводка, время которой на сегодня уже прошло к моменту включения/смены настройки, не отправляется «задним числом»."""
+    if not u: return
+    local = utc_to_local(now, u["zone"])
+    for kind in kinds:
+        on_k, time_k = DIGESTS[kind]
+        if not (u["s"]["enabled"] and u["s"][on_k]): continue
+        fire = at_clock(local.date(), u["s"][time_k])
+        if fire <= local:
+            ts = iso(now)
+            await db.execute(
+                "INSERT OR IGNORE INTO notification_log (dedup_key, user_id, chat_id, kind, occ_day, fire_at, status, detail, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'skipped', ?, ?, ?)",
+                (digest_key(kind, u["user_id"], local.date().isoformat()), u["user_id"], u["chat_id"], kind,
+                 local.date().isoformat(), iso(local_to_utc(fire, u["zone"])),
+                 "время на сегодня уже прошло к моменту включения или смены настройки", ts, ts))
+    await db.commit()
+
+
+# --- определение пользователя в API ---
+def verify_init_data(init_data: str) -> dict:
+    """Проверка подписи Telegram WebApp initData (HMAC-SHA256 от токена бота). Возвращает объект user."""
+    try:
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+        got = pairs.pop("hash")
+        check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+        secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+        if not hmac.compare_digest(hmac.new(secret, check.encode(), hashlib.sha256).hexdigest(), got):
+            raise ValueError("bad hash")
+        age = _time.time() - int(pairs["auth_date"])
+        user = json.loads(pairs["user"])
+        int(user["id"])
+    except Exception:
+        raise DomainError(401, "Не удалось подтвердить пользователя Telegram — откройте приложение из бота")
+    if age > INIT_DATA_MAX_AGE:
+        raise DomainError(401, "Сессия устарела — закройте и откройте приложение заново")
+    return user
+
+
+async def api_user(request: Request) -> dict:
+    init = request.headers.get("X-Telegram-Init-Data")
+    async with notif_db() as db:
+        if init:
+            tg = verify_init_data(init)
+            uid = int(tg["id"])
+            u = await load_user(db, uid) or await ensure_user(db, uid, uid)  # в личном чате chat_id == user_id
+        else:
+            if not ALLOW_NO_AUTH: raise DomainError(401, "Откройте приложение из Telegram")
+            async with db.execute("SELECT user_id FROM users ORDER BY created_at, user_id LIMIT 1") as cur:
+                r = await cur.fetchone()
+            if not r: raise DomainError(409, "Сначала нажмите /start в Telegram-боте — тогда можно настроить уведомления")
+            u = await load_user(db, r[0])
+        # пояс устройства подхватываем автоматически, пока пользователь не выбрал свой вручную
+        tz_hdr = (request.headers.get("X-Timezone") or "").strip()
+        if u["tz_auto"] and tz_hdr and tz_hdr != u["tz"]:
+            try:
+                ZoneInfo(tz_hdr)
+                await db.execute("UPDATE users SET tz = ?, updated_at = ? WHERE user_id = ?", (tz_hdr, iso(utcnow()), u["user_id"]))
                 await db.commit()
+                new = await load_user(db, u["user_id"])
+                await reschedule_user(db, u, new)
+                u = new
+            except Exception:
+                pass
+        return u
+
+
+# =====================================================================
+#  Актуальность отправки — единая проверка
+# =====================================================================
+def check_row(row, u: dict | None, task, now: datetime) -> tuple[bool, str]:
+    """Можно ли отправить это уведомление ПРЯМО СЕЙЧАС. row — запись журнала (или кандидат с теми же ключами),
+    u — пользователь с настройками, task — строка tasks или None, now — UTC. Возвращает (ok, причина отказа)."""
+    kind = row["kind"]
+    if kind == "test": return True, ""
+    if not u or not u["active"]: return False, "пользователь недоступен (бот остановлен или не запущен)"
+    s = u["s"]
+    if not s["enabled"]: return False, "уведомления выключены"
+    local = utc_to_local(now, u["zone"])
+    day = row["occ_day"]
+
+    if kind in DIGESTS:
+        on_k, time_k = DIGESTS[kind]
+        if not s[on_k]: return False, "этот вид уведомлений выключен"
+        if local.date().isoformat() != day: return False, "день уже закончился"
+        fire = local_to_utc(at_clock(date.fromisoformat(day), s[time_k]), u["zone"])
+        if iso(fire) != row["fire_at"]: return False, "время отправки изменено"
+        if now >= fire + DIGEST_GRACE: return False, "время отправки прошло"
+        return True, ""
+
+    if kind in ("remind", "snooze"):
+        off = row["offset_min"]
+        if not task: return False, "задача удалена"
+        if task["remind_min"] == -1: return False, "для задачи отключены напоминания"
+        if not task["due_time"]: return False, "у задачи нет времени"
+        if kind == "remind":
+            if off not in REMIND_OFFSETS or not s[f"remind_{off}"]: return False, f"напоминание за {off} мин выключено"
+            if task["due_time"] != row["task_time"]: return False, "время задачи изменено"
+        if not occurs(task, day): return False, "задача перенесена или не запланирована на эту дату"
+        if is_done(task, day): return False, "задача уже выполнена"
+        if kind == "snooze":
+            return (True, "") if local.date().isoformat() == day else (False, "день уже закончился")
+        start = at_clock(date.fromisoformat(day), task["due_time"])
+        if local >= start: return False, "время начала задачи уже наступило"
+        for smaller in REMIND_OFFSETS:  # более позднее напоминание уже открылось — это устарело
+            if smaller < off and s[f"remind_{smaller}"] and start - timedelta(minutes=smaller) <= local:
+                return False, "уже наступило время более позднего напоминания"
+        return True, ""
+    return False, "неизвестный тип уведомления"
+
+
+def reminder_candidates(u: dict, tasks, now: datetime):
+    """Напоминания, окно которых уже открыто: [старт − отступ, старт). Сегодняшние и завтрашние повторы
+    (напоминание за 30 минут до 00:10 наступает ещё «вчера»)."""
+    s = u["s"]
+    if not s["enabled"]: return
+    offsets = [o for o in REMIND_OFFSETS if s[f"remind_{o}"]]
+    if not offsets: return
+    tz = u["zone"]
+    local = utc_to_local(now, tz)
+    for r in tasks:
+        if not r["due_time"] or r["remind_min"] == -1: continue
+        for d in (local.date(), local.date() + timedelta(days=1)):
+            day = d.isoformat()
+            try:
+                if not occurs(r, day) or is_done(r, day): continue
+                start = at_clock(d, r["due_time"])
+            except (ValueError, TypeError):
+                continue
+            if local >= start: continue
+            for off in offsets:
+                fire_local = start - timedelta(minutes=off)
+                if fire_local > local: continue
+                yield {"kind": "remind", "user_id": u["user_id"], "task_id": r["id"], "occ_day": day,
+                       "task_time": r["due_time"], "offset_min": off, "title": r["text"],
+                       "fire_at": iso(local_to_utc(fire_local, tz)),
+                       "dedup_key": f"remind:{u['user_id']}:{r['id']}:{day}:{r['due_time']}:{off}"}
+
+
+def digest_candidates(u: dict, now: datetime):
+    s = u["s"]
+    if not s["enabled"]: return
+    local = utc_to_local(now, u["zone"])
+    for kind, (on_k, time_k) in DIGESTS.items():
+        if not s[on_k]: continue
+        fire = local_to_utc(at_clock(local.date(), s[time_k]), u["zone"])
+        if fire <= now < fire + DIGEST_GRACE:
+            day = local.date().isoformat()
+            yield {"kind": kind, "user_id": u["user_id"], "task_id": None, "occ_day": day, "task_time": None,
+                   "offset_min": None, "title": None, "fire_at": iso(fire), "dedup_key": digest_key(kind, u["user_id"], day)}
+
+
+# =====================================================================
+#  Журнал: захват, доставка, ошибки
+# =====================================================================
+async def claim(db, cand: dict, chat_id: int) -> int | None:
+    """Резервирует отправку. Возвращает id, если ЭТОТ вызов получил право отправить (первый раз или после
+    пересчёта), иначе None — такая отправка уже есть в журнале (отправлена, ждёт, провалена или пропущена)."""
+    now = iso(utcnow())
+    cur = await db.execute(
+        "INSERT OR IGNORE INTO notification_log (dedup_key, user_id, chat_id, kind, task_id, occ_day, task_time, offset_min, title, "
+        "fire_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+        (cand["dedup_key"], cand["user_id"], chat_id, cand["kind"], cand["task_id"], cand["occ_day"], cand["task_time"],
+         cand["offset_min"], cand["title"], cand["fire_at"], now, now))
+    if cur.rowcount == 1:
+        await db.commit()
+        return cur.lastrowid
+    # запись была отменена при пересчёте расписания, а теперь снова актуальна — оживляем
+    cur = await db.execute(
+        "UPDATE notification_log SET status = 'pending', attempts = 0, next_attempt_at = NULL, detail = NULL, chat_id = ?, "
+        "fire_at = ?, title = ?, updated_at = ? WHERE dedup_key = ? AND status = 'cancelled'",
+        (chat_id, cand["fire_at"], cand["title"], now, cand["dedup_key"]))
+    await db.commit()
+    if cur.rowcount == 0: return None
+    async with db.execute("SELECT id FROM notification_log WHERE dedup_key = ?", (cand["dedup_key"],)) as c2:
+        return (await c2.fetchone())[0]
+
+
+async def _finish(db, log_id: int, status: str, detail: str | None = None, **extra):
+    sets = {"status": status, "detail": detail, "updated_at": iso(utcnow()), **extra}
+    await db.execute("UPDATE notification_log SET " + ", ".join(f"{k} = ?" for k in sets) + " WHERE id = ?",
+                     (*sets.values(), log_id))
+    await db.commit()
+
+
+async def _retry_or_fail(db, log_id: int, attempts: int, err: str, delay: int | None = None):
+    if attempts >= MAX_SEND_ATTEMPTS:
+        return await _finish(db, log_id, "failed", f"исчерпаны попытки ({attempts}): {err}")
+    wait = delay if delay is not None else RETRY_DELAYS[min(attempts - 1, len(RETRY_DELAYS) - 1)]
+    await _finish(db, log_id, "pending", f"попытка {attempts} не удалась: {err}",
+                  next_attempt_at=iso(utcnow() + timedelta(seconds=wait)))
+
+
+async def fetch_task_row(db, task_id):
+    if task_id is None: return None
+    async with db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)) as cur:
+        return await cur.fetchone()
+
+
+async def deliver(db, log_id: int) -> str:
+    """Одна попытка отправки записи журнала. Возвращает итоговый статус записи."""
+    now = utcnow()
+    cur = await db.execute("UPDATE notification_log SET status = 'sending', attempts = attempts + 1, updated_at = ? "
+                           "WHERE id = ? AND status = 'pending'", (iso(now), log_id))
+    await db.commit()
+    if cur.rowcount == 0: return "busy"  # уже обрабатывается или завершена — повторно не шлём
+    async with db.execute("SELECT * FROM notification_log WHERE id = ?", (log_id,)) as c:
+        row = await c.fetchone()
+    attempts = row["attempts"]
+    try:
+        u = await load_user(db, row["user_id"])
+        task = await fetch_task_row(db, row["task_id"])
+        ok, reason = check_row(row, u, task, now)  # актуальные дата, время и статус — перед КАЖДОЙ отправкой
+        if not ok:
+            await _finish(db, log_id, "cancelled", reason)
+            return "cancelled"
+        built = await build_message(db, row, u, task, now)
+    except Exception as e:
+        log.exception("Не удалось подготовить уведомление %s", log_id)
+        await _retry_or_fail(db, log_id, attempts, f"ошибка подготовки: {e!r}")
+        return "pending"
+    if built is None:
+        await _finish(db, log_id, "skipped", "нечего отправлять")
+        return "skipped"
+    text, kb = built
+    try:
+        msg = await bot.send_message(u["chat_id"] if u else row["chat_id"], text, reply_markup=kb, parse_mode=ParseMode.HTML)
+    except TelegramRetryAfter as e:
+        await _retry_or_fail(db, log_id, attempts, f"Telegram просит подождать {e.retry_after} с", delay=int(e.retry_after) + 1)
+        return "pending"
+    except TelegramForbiddenError as e:
+        await _finish(db, log_id, "failed", f"Telegram: доступ запрещён ({e.message}). Уведомления отключены до нового /start")
+        await db.execute("UPDATE users SET active = 0, updated_at = ? WHERE user_id = ?", (iso(utcnow()), row["user_id"]))
+        await db.commit()
+        return "failed"
+    except TelegramBadRequest as e:
+        await _finish(db, log_id, "failed", f"Telegram отклонил сообщение: {e.message}")
+        return "failed"
+    except (TelegramNetworkError, TelegramServerError, asyncio.TimeoutError) as e:
+        await _retry_or_fail(db, log_id, attempts, f"сеть/сервер Telegram: {e!s}"[:300])
+        return "pending"
+    except TelegramAPIError as e:
+        await _finish(db, log_id, "failed", f"Ошибка Telegram API: {e.message}"[:300])
+        return "failed"
+    except Exception as e:  # неизвестная ошибка клиента — пробуем ещё, но в пределах лимита попыток
+        log.exception("Неожиданная ошибка отправки %s", log_id)
+        await _retry_or_fail(db, log_id, attempts, f"неожиданная ошибка: {e!r}"[:300])
+        return "pending"
+    await _finish(db, log_id, "sent", None, sent_at=iso(utcnow()), tg_message_id=msg.message_id, kb_active=1 if kb else 0)
+    return "sent"
+
+
+async def cancel_invalid_pending(db, user_id: int | None = None, task_id: int | None = None) -> int:
+    """Пересчёт расписания: ожидающие отправки, которые больше не актуальны (задачу перенесли, выполнили, удалили,
+    поменяли время/настройки), помечаются «cancelled». Их ключи останутся в журнале, но новые ключи не блокируют."""
+    q, args = "SELECT * FROM notification_log WHERE status = 'pending'", []
+    if user_id is not None: q += " AND user_id = ?"; args.append(user_id)
+    if task_id is not None: q += " AND task_id = ?"; args.append(task_id)
+    async with db.execute(q, args) as cur:
+        rows = await cur.fetchall()
+    now, users, n = utcnow(), {}, 0
+    for row in rows:
+        if row["user_id"] not in users: users[row["user_id"]] = await load_user(db, row["user_id"])
+        ok, reason = check_row(row, users[row["user_id"]], await fetch_task_row(db, row["task_id"]), now)
+        if not ok:
+            await db.execute("UPDATE notification_log SET status = 'cancelled', detail = ?, updated_at = ? WHERE id = ? AND status = 'pending'",
+                             (f"расписание пересчитано: {reason}", iso(now), row["id"]))
+            n += 1
+    await db.commit()
+    return n
+
+
+# =====================================================================
+#  Тексты и клавиатуры
+# =====================================================================
+def reminder_kb(task_id: int, day: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Выполнено", callback_data=f"rm_ok:{task_id}:{day}"),
+        InlineKeyboardButton(text="➡️ Перенести", callback_data=f"rm_mv:{task_id}:{day}")]])
+
+
+def move_menu_kb(task, day: str, today: str) -> InlineKeyboardMarkup:
+    """Что предлагает «Перенести» — зависит от типа задачи (разовую переносим, повторяющуюся можно только отложить)."""
+    t, d = task["id"], day
+    rows = []
+    if task["repeat_type"] != "none":
+        rows.append([InlineKeyboardButton(text="🔕 Через 30 мин", callback_data=f"rm_z30:{t}:{d}"),
+                     InlineKeyboardButton(text="🔕 Через 1 час", callback_data=f"rm_z60:{t}:{d}")])
+    else:
+        late = planned_of(task) < today
+        if task["due_time"] and not late:
+            rows.append([InlineKeyboardButton(text="⏱ +30 мин", callback_data=f"rm_p30:{t}:{d}"),
+                         InlineKeyboardButton(text="⏱ +1 час", callback_data=f"rm_p60:{t}:{d}")])
+        row = []
+        if late: row.append(InlineKeyboardButton(text="Сегодня", callback_data=f"rm_td:{t}:{d}"))
+        row += [InlineKeyboardButton(text="Завтра", callback_data=f"rm_tom:{t}:{d}"),
+                InlineKeyboardButton(text="📅 Дата…", callback_data=f"rm_dt:{t}:{d}")]
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="‹ Назад", callback_data=f"rm_bk:{t}:{d}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+LEVEL_MARK = {3: "🔴 ", 2: "", 1: ""}
+
+
+async def build_message(db, row, u: dict, task, now: datetime):
+    """(текст, клавиатура) для отправки либо None, если слать нечего. Строится из АКТУАЛЬНОГО состояния БД."""
+    kind = row["kind"]
+    local = utc_to_local(now, u["zone"]) if u else utc_to_local(now, LOCAL_TZ)
+    if kind == "test":
+        return "🔔 <b>Тест уведомлений</b>\nЕсли вы это видите — доставка работает.", None
+    if kind in ("remind", "snooze"):
+        day = row["occ_day"]
+        start = at_clock(date.fromisoformat(day), task["due_time"])
+        mins = max(1, math.ceil((start - local).total_seconds() / 60))
+        when = task["due_time"] + ("" if day == local.date().isoformat() else " · завтра")
+        head = f"⏰ <b>Через {ru_minutes(mins)}</b>" if kind == "remind" else f"🔕 <b>Напоминание</b> · начало через {ru_minutes(mins)}"
+        text = f"{head}\n{LEVEL_MARK.get(task['level'], '')}<b>{html.escape(task['text'])}</b>\n🕒 {when}"
+        return text, reminder_kb(task["id"], day)
+    return await build_digest(db, kind, u, local.date().isoformat())
+
+
+def _task_line(i: int, t: dict, with_plan_note: bool = False) -> str:
+    name = html.escape(t["text"])
+    bits = []
+    if t["time"]: bits.append(t["time"])
+    if with_plan_note and t["overdue"]: bits.append(f"план был {short_date(t['planned'])}")
+    if t["past_due"] and t["due"]: bits.append(f"срок {short_date(t['due'])} прошёл")
+    if t["repeat"] != "none": bits.append("🔁")
+    mark = "⚠️" if (t["overdue"] or t["past_due"]) else "▫️"
+    return f"{mark} {i}. {LEVEL_MARK.get(t['level'], '')}{name}" + (f" — {' · '.join(bits)}" if bits else "")
+
+
+def _digest_rows(tasks: list[dict], day: str) -> list:
+    rows = []
+    for i, t in enumerate(tasks, 1):
+        row = [InlineKeyboardButton(text=f"✅ {i}", callback_data=f"rm_ok:{t['id']}:{day}")]
+        if t["repeat"] == "none":
+            row.append(InlineKeyboardButton(text=f"➡️ {i}", callback_data=f"rm_mv:{t['id']}:{day}"))
+        rows.append(row)
+    return rows
+
+
+async def build_digest(db, kind: str, u: dict, today: str, refresh: bool = False):
+    """Утренний план / вечерний итог / сводка просроченных. refresh=True — пересборка уже отправленного сообщения
+    (вместо None возвращает «всё сделано»). Выполненные задачи в списках не показываются."""
+    tasks = await list_tasks(db, today, "today")
+    d = date.fromisoformat(today)
+    title_day = f"{d.day} {MONTHS_GEN[d.month - 1]}"
+    open_all = [t for t in tasks if not t["completed"]]
+    late = [t for t in open_all if t["overdue"] or t["past_due"]]
+    shown_limit = PLAN_LIMIT
+
+    if kind == "morning":
+        items = sorted([t for t in open_all if not (t["overdue"] or t["past_due"])],
+                       key=lambda t: (t["time"] is None, t["time"] or "", -t["level"]))
+        async with db.execute("SELECT title, time, emoji FROM events WHERE date = ? ORDER BY COALESCE(time, '99:99'), id", (today,)) as cur:
+            events = await cur.fetchall()
+        if not items and not events and not refresh: return None
+        lines = [f"☀️ <b>Доброе утро! План на {title_day}</b>", ""]
+        if items:
+            lines += [_task_line(i, t) for i, t in enumerate(items[:shown_limit], 1)]
+            if len(items) > shown_limit: lines.append(f"…и ещё {len(items) - shown_limit} в приложении")
+        else:
+            lines.append("Задач на сегодня нет 🌿" if not refresh else "Все задачи на сегодня выполнены 🎉")
+        if events:
+            lines += ["", "<b>События</b>"] + [f"{e['emoji']} {(e['time'] + ' — ') if e['time'] else ''}{html.escape(e['title'])}" for e in events]
+        if late and u["s"]["overdue_on"]:
+            lines += ["", f"⚠️ Просроченных задач: {len(late)} — сводка придёт в {u['s']['overdue_time']}"]
+        rows = _digest_rows(items[:shown_limit], today)
+        return "\n".join(lines), (InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
+
+    if kind == "overdue":
+        items = sorted(late, key=lambda t: (t["planned"], t["time"] or "", -t["level"]))
+        if not items and not refresh: return None
+        if not items: return "✅ <b>Просроченных задач больше нет</b>", None
+        lines = [f"⚠️ <b>Просроченные задачи ({len(items)})</b>", ""]
+        lines += [_task_line(i, t, with_plan_note=True) for i, t in enumerate(items[:shown_limit], 1)]
+        if len(items) > shown_limit: lines.append(f"…и ещё {len(items) - shown_limit} в приложении")
+        rows = _digest_rows(items[:shown_limit], today)
+        n_carry = sum(1 for t in items if t["overdue"])
+        if n_carry: rows.append([InlineKeyboardButton(text=f"⏩ Всё на сегодня ({n_carry})", callback_data=f"rm_carry:0:{today}")])
+        return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+    if kind == "evening":
+        async with db.execute("SELECT * FROM tasks") as cur: all_rows = await cur.fetchall()
+        planned = sum(1 for r in all_rows if occurs(r, today))
+        async with db.execute("SELECT COUNT(*) FROM completions WHERE day = ?", (today,)) as cur:
+            done = (await cur.fetchone())[0]
+        total = max(planned, done)
+        if total == 0 and not open_all and not refresh: return None
+        pct = round(done / total * 100) if total else 0
+        lines = [f"🌙 <b>Итог дня — {title_day}</b>", "", f"<blockquote>Выполнено: {done} из {total} ({pct}%)</blockquote>"]
+        items = sorted(open_all, key=lambda t: (t["time"] is None, t["time"] or "", -t["level"]))
+        rows = []
+        if items:
+            lines += ["", "<b>Не завершено:</b>"] + [_task_line(i, t, with_plan_note=True) for i, t in enumerate(items[:shown_limit], 1)]
+            if len(items) > shown_limit: lines.append(f"…и ещё {len(items) - shown_limit} в приложении")
+            rows = _digest_rows(items[:shown_limit], today)
+            n_push = sum(1 for t in items if t["repeat"] == "none")
+            if n_push: rows.append([InlineKeyboardButton(text=f"➡️ Всё на завтра ({n_push})", callback_data=f"rm_alltom:0:{today}")])
+        else:
+            lines += ["", "🎉 Все задачи на сегодня выполнены!"]
+        return "\n".join(lines), (InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
+    return None
+
+
+# =====================================================================
+#  Действия из кнопок (общая логика для бота; приложение работает через обычные API задач)
+# =====================================================================
+async def push_unfinished_to_tomorrow_db(db, today: str, tomorrow: str) -> int:
+    cur = await db.execute(
+        "UPDATE tasks SET planned_date = ?, reminded_on = NULL WHERE repeat_type = 'none' AND done_on IS NULL "
+        "AND COALESCE(planned_date, created_on, '2000-01-01') <= ?", (tomorrow, today))
+    await db.commit()
+    if cur.rowcount: await task_changed(None)
+    return cur.rowcount
+
+
+async def create_snooze(db, u: dict, task_id: int, day: str, minutes: int) -> None:
+    now = utcnow()
+    fire = now + timedelta(minutes=minutes)
+    ts = iso(now)
+    row = await fetch_task(db, task_id)
+    await db.execute(
+        "INSERT OR IGNORE INTO notification_log (dedup_key, user_id, chat_id, kind, task_id, occ_day, task_time, title, fire_at, "
+        "status, created_at, updated_at) VALUES (?, ?, ?, 'snooze', ?, ?, ?, ?, ?, 'pending', ?, ?)",
+        (f"snooze:{u['user_id']}:{task_id}:{day}:{int(fire.replace(tzinfo=timezone.utc).timestamp())}", u["user_id"], u["chat_id"],
+         task_id, day, row["due_time"], row["text"], iso(fire), ts, ts))
+    await db.commit()
+
+
+async def reminder_action(u: dict, action: str, task_id: int, day: str) -> tuple[str, bool]:
+    """Выполняет действие кнопки. Возвращает (текст всплывающего ответа, показывать ли как предупреждение).
+    Бросает DomainError для понятных отказов."""
+    now = utcnow()
+    local = utc_to_local(now, u["zone"])
+    today = local.date().isoformat()
+    tomorrow = (local.date() + timedelta(days=1)).isoformat()
+    async with notif_db() as db:
+        if action == "carry":
+            n = await carry_over_db(db, today)
+            return (f"Перенесено на сегодня: {n}" if n else "Просроченных задач нет"), False
+        if action == "alltom":
+            n = await push_unfinished_to_tomorrow_db(db, today, tomorrow)
+            return (f"Перенесено на завтра: {n}" if n else "Переносить нечего"), False
+        row = await fetch_task(db, task_id)  # 404 → «Задача не найдена»
+        if action == "ok":
+            if row["repeat_type"] != "none" and day != today:
+                raise DomainError(400, f"Повтор запланирован на {short_date(day)} — отметить можно в этот день")
+            return ("Выполнено ✅", False) if await complete_task_db(db, task_id, today) else ("Уже выполнено ✅", False)
+        if action in ("p30", "p60"):
+            d, t = await shift_task_time_db(db, task_id, 30 if action == "p30" else 60, local)
+            return f"Перенесено на {t}" + ("" if d == today else f" · {short_date(d)}"), False
+        if action in ("tom", "td"):
+            to = tomorrow if action == "tom" else today
+            if row["done_on"] is not None and row["repeat_type"] == "none": raise DomainError(409, "Задача уже выполнена")
+            if planned_of(row) == to: return ("Уже на завтра" if action == "tom" else "Уже на сегодня"), False
+            await move_task_db(db, task_id, to, today)
+            return ("Перенесено на завтра" if action == "tom" else "Перенесено на сегодня"), False
+        if action in ("z30", "z60"):
+            if row["repeat_type"] == "none": raise DomainError(400, "Для разовой задачи используйте перенос")
+            if not row["due_time"] or not occurs(row, today) or is_done(row, today):
+                raise DomainError(409, "Откладывать нечего — задача на сегодня не активна")
+            m = 30 if action == "z30" else 60
+            await create_snooze(db, u, task_id, today, m)
+            return f"Напомню через {m} мин", False
+    raise DomainError(400, "Неизвестное действие")
+
+
+# =====================================================================
+#  Синхронизация уже отправленных сообщений с состоянием задач
+# =====================================================================
+async def safe_edit(chat_id, message_id, text: str, kb):
+    try:
+        await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=kb, parse_mode=ParseMode.HTML)
+        return True
+    except TelegramBadRequest as e:
+        if "not modified" not in str(e).lower():
+            log.info("Не удалось обновить сообщение %s: %s", message_id, e)
+    except TelegramRetryAfter:
+        log.info("Telegram просит подождать — сообщение %s обновится при следующем изменении", message_id)
+    except (TelegramAPIError, asyncio.TimeoutError) as e:
+        log.warning("Ошибка обновления сообщения %s: %r", message_id, e)
+    return False
+
+
+async def reminder_view(task, row, today: str):
+    """Актуальный вид сообщения-напоминания: (текст, клавиатура, состояние ok|done|moved|changed|deleted)."""
+    if not task: return "🗑 <b>Задача удалена</b>", None, "deleted"
+    name, day = html.escape(task["text"]), row["occ_day"]
+    if is_done(task, day) or (task["repeat_type"] != "none" and task["done_on"] == today):
+        return f"✅ <s>{name}</s> — выполнено", None, "done"
+    if task["repeat_type"] == "none" and (planned_of(task) != day or task["due_time"] != row["task_time"]):
+        when = short_date(planned_of(task)) + (f", {task['due_time']}" if task["due_time"] else "")
+        return f"➡️ <b>{name}</b> — перенесено: {when}", None, "moved"
+    if not occurs(task, day) or task["due_time"] != row["task_time"]:
+        return f"🔄 <b>{name}</b> — расписание изменилось", None, "changed"
+    return None, None, "ok"
+
+
+async def refresh_messages(task_id: int | None):
+    """Приводит отправленные сообщения в соответствие с БД после изменения задачи из приложения или бота:
+    убирает кнопки у устаревших напоминаний и пересобирает сводки. Все ошибки гасятся — это best-effort."""
+    try:
+        async with notif_db() as db:
+            cutoff = iso(utcnow() - KB_EDIT_WINDOW)
+            q = "SELECT * FROM notification_log WHERE status = 'sent' AND kb_active = 1 AND sent_at >= ? AND tg_message_id IS NOT NULL"
+            args = [cutoff]
+            if task_id is not None:
+                q += " AND (task_id = ? OR task_id IS NULL)"
+                args.append(task_id)
+            async with db.execute(q, args) as cur: rows = await cur.fetchall()
+            users = {}
+            for row in rows:
+                if row["user_id"] not in users: users[row["user_id"]] = await load_user(db, row["user_id"])
+                u = users[row["user_id"]]
+                if not u: continue
+                try:
+                    today = utc_to_local(utcnow(), u["zone"]).date().isoformat()
+                    if row["kind"] in ("remind", "snooze"):
+                        text, kb, state = await reminder_view(await fetch_task_row(db, row["task_id"]), row, today)
+                        if state == "ok": continue
+                    elif row["kind"] in DIGESTS:
+                        if row["occ_day"] != today: continue
+                        text, kb = await build_digest(db, row["kind"], u, today, refresh=True)
+                    else:
+                        continue
+                    await safe_edit(row["chat_id"], row["tg_message_id"], text, kb)
+                    if kb is None:
+                        await db.execute("UPDATE notification_log SET kb_active = 0, updated_at = ? WHERE id = ?", (iso(utcnow()), row["id"]))
+                        await db.commit()
+                except Exception:
+                    log.exception("Не удалось обновить сообщение уведомления %s", row["id"])
+    except Exception:
+        log.exception("Не удалось синхронизировать сообщения уведомлений")
+
+
+async def task_changed(task_id: int | None):
+    """Хук для всех мест, где меняется задача (API и бот). Никогда не бросает исключений.
+    task_id=None — изменилось много задач сразу."""
+    try:
+        async with notif_db() as db:
+            await cancel_invalid_pending(db, task_id=task_id)
+    except Exception:
+        log.exception("Не удалось пересчитать расписание уведомлений")
+    _spawn(refresh_messages(task_id))
+
+
+# =====================================================================
+#  Планировщик
+# =====================================================================
+async def recover_stuck(db, now: datetime, all_: bool = False):
+    """Записи «sending» остаются после падения посреди отправки. Неизвестно, дошло ли сообщение, поэтому, чтобы не
+    дублировать, повторно не шлём: помечаем как failed с понятной причиной."""
+    cutoff = iso(now) if all_ else iso(now - STUCK_SENDING_AFTER)
+    cur = await db.execute("UPDATE notification_log SET status = 'failed', detail = ?, updated_at = ? "
+                           "WHERE status = 'sending' AND updated_at <= ?",
+                           ("отправка прервана перезапуском или сбоем; повторно не отправляется, чтобы не дублировать", iso(now), cutoff))
+    await db.commit()
+    return cur.rowcount
+
+
+async def process_pending(db, now: datetime):
+    async with db.execute("SELECT id FROM notification_log WHERE status = 'pending' AND fire_at <= ? "
+                          "AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY fire_at LIMIT 50",
+                          (iso(now), iso(now))) as cur:
+        ids = [r[0] for r in await cur.fetchall()]
+    for i in ids:
+        try:
+            await deliver(db, i)
+        except Exception:
+            log.exception("Сбой доставки записи %s", i)
+
+
+async def reminder_tick(now: datetime | None = None):
+    async with _tick_lock_get():
+        now = now or utcnow()
+        async with notif_db() as db:
+            await recover_stuck(db, now)
+            users = await load_active_users(db)
+            if users:
+                async with db.execute("SELECT * FROM tasks") as cur: tasks = await cur.fetchall()
+                for u in users:
+                    try:
+                        cands = list(reminder_candidates(u, tasks, now)) + list(digest_candidates(u, now))
+                        tmap = {r["id"]: r for r in tasks}
+                        for c in cands:
+                            ok, _ = check_row(c, u, tmap.get(c["task_id"]), now)
+                            if not ok: continue
+                            log_id = await claim(db, c, u["chat_id"])
+                            if log_id: await deliver(db, log_id)
+                    except Exception:
+                        log.exception("Сбой обработки уведомлений пользователя %s", u["user_id"])
+                await process_pending(db, now)
+
+
+async def recover_after_restart():
+    """После перезапуска расписание выводится из БД само; здесь только убираем хвосты прерванных отправок
+    и отменяем то, что успело устареть, пока приложение было выключено."""
+    async with notif_db() as db:
+        n = await recover_stuck(db, utcnow(), all_=True)
+        c = await cancel_invalid_pending(db)
+        if n or c: log.info("Восстановление уведомлений: прервано %s, отменено устаревших %s", n, c)
+
+
+async def purge_history():
+    async with notif_db() as db:
+        await db.execute("DELETE FROM notification_log WHERE status != 'pending' AND created_at < ?",
+                         (iso(utcnow() - timedelta(days=HISTORY_KEEP_DAYS)),))
+        await db.commit()
 
 
 async def reminder_loop():
+    """Бесконечный цикл планировщика: любая ошибка БД/Telegram логируется, цикл продолжает работу."""
+    try:
+        await recover_after_restart()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("Ошибка восстановления расписания уведомлений")
+    last_purge = 0.0
     while True:
         try:
-            await check_reminders()
+            await reminder_tick()
+            if _time.monotonic() - last_purge > 3600:
+                last_purge = _time.monotonic()
+                await purge_history()
         except asyncio.CancelledError:
             raise
-        except Exception as e:
-            print("Ошибка напоминаний:", e)
-        await asyncio.sleep(30)
+        except Exception:
+            log.exception("Ошибка планировщика уведомлений")
+        await asyncio.sleep(NOTIFY_TICK_SECONDS)
+
+
+# =====================================================================
+#  API уведомлений (приложение)
+# =====================================================================
+class NotifySettingsBody(BaseModel):
+    enabled: bool | None = None
+    remind_30: bool | None = None
+    remind_10: bool | None = None
+    morning_on: bool | None = None
+    morning_time: str | None = None
+    evening_on: bool | None = None
+    evening_time: str | None = None
+    overdue_on: bool | None = None
+    overdue_time: str | None = None
+    tz: str | None = None
+    tz_auto: bool | None = None
+
+
+@app.get("/api/notifications/settings")
+async def get_notification_settings(request: Request):
+    return {"settings": settings_view(await api_user(request))}
+
+
+@app.put("/api/notifications/settings")
+async def put_notification_settings(body: NotifySettingsBody, request: Request):
+    u = await api_user(request)
+    patch = body.model_dump(exclude_none=True)
+    return {"status": "ok", "settings": await update_notification_settings(u["user_id"], patch)}
+
+
+@app.get("/api/notifications/history")
+async def get_notification_history(request: Request, limit: int = 40):
+    u = await api_user(request)
+    limit = min(max(limit, 1), 200)
+    async with notif_db() as db:
+        async with db.execute(
+                "SELECT kind, title, status, attempts, detail, fire_at, sent_at, occ_day, task_time, offset_min FROM notification_log "
+                "WHERE user_id = ? AND (status != 'pending' OR attempts > 0) "
+                "ORDER BY id DESC LIMIT ?", (u["user_id"], limit)) as cur:
+            rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        stamp = utc_to_local(datetime.fromisoformat(r["sent_at"] or r["fire_at"]), u["zone"])
+        out.append({"kind": r["kind"], "label": KIND_LABELS.get(r["kind"], r["kind"]), "title": r["title"], "status": r["status"],
+                    "attempts": r["attempts"], "detail": r["detail"], "when": stamp.strftime("%d.%m %H:%M"),
+                    "offset": r["offset_min"], "task_time": r["task_time"]})
+    return {"history": out}
+
+
+@app.post("/api/notifications/test")
+async def send_test_notification(request: Request):
+    u = await api_user(request)
+    now = utcnow()
+    cand = {"kind": "test", "user_id": u["user_id"], "task_id": None, "occ_day": None, "task_time": None, "offset_min": None,
+            "title": "Проверка доставки", "fire_at": iso(now), "dedup_key": f"test:{u['user_id']}:{_time.time_ns()}"}
+    async with notif_db() as db:
+        log_id = await claim(db, cand, u["chat_id"])
+        status = await deliver(db, log_id)
+        async with db.execute("SELECT status, detail FROM notification_log WHERE id = ?", (log_id,)) as cur:
+            r = await cur.fetchone()
+    if r["status"] != "sent":
+        raise DomainError(502, f"Не удалось отправить: {r['detail'] or r['status']}")
+    return {"status": "ok"}
 
 
 # --- привычки ---

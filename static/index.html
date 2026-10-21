@@ -627,6 +627,29 @@ body{position:relative}
 .toast{width:max-content;text-align:center;word-break:normal;overflow-wrap:anywhere}
 .toast.has-act{pointer-events:auto}
 .toast-act{margin-left:14px;min-height:32px;padding:0 4px;background:none;border:0;color:var(--pink);font:inherit;font-size:14px!important;font-weight:800;cursor:pointer}
+
+/* Уведомления */
+.nt-sec{font-size:13px;font-weight:700;color:var(--ink-2);margin:18px 4px 8px;text-transform:uppercase;letter-spacing:.4px}
+.nt-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:56px;padding:6px 0}
+.nt-row+.nt-row{border-top:1px solid var(--line)}
+.nt-row .nt-t{font-weight:600;font-size:15px}
+.nt-row .nt-s{font-size:12px;color:var(--ink-2);margin-top:2px}
+.nt-row.off .nt-t,.nt-row.off .nt-s{opacity:.55}
+.nt-ctl{display:flex;align-items:center;gap:10px;flex:none}
+.nt-ctl input[type=time].glass-input{flex:0 0 108px;min-height:40px;padding:0 10px}
+.nt-ctl input[type=time].glass-input:disabled{opacity:.45}
+.sw{position:relative;width:50px;height:30px;flex:none}
+.sw input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer;z-index:1}
+.sw i{position:absolute;inset:0;border-radius:15px;background:var(--surface);border:1px solid var(--line);transition:background .2s}
+.sw i::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(48,41,32,.25);transition:transform .2s}
+.sw input:checked+i{background:var(--green-d);border-color:var(--green-d)}
+.sw input:checked+i::after{transform:translateX(20px)}
+.sw input:disabled{cursor:default}.sw input:disabled+i{opacity:.45}
+.nt-hist{display:flex;flex-direction:column;gap:2px}
+.nt-h{padding:10px 0;border-top:1px solid var(--line);font-size:14px}
+.nt-h:first-child{border-top:0}
+.nt-h .nt-s{font-size:12px;color:var(--ink-2);margin-top:3px;word-break:break-word}
+.chip.warn{background:var(--yellow);color:var(--ink)}
 </style>
 </head>
 <body>
@@ -640,9 +663,14 @@ body{position:relative}
             <h1 id="pageTitle">Главная</h1>
             <p id="pageSubtitle"></p>
         </div>
+        <div style="display:flex;gap:8px">
+        <button class="round-btn" id="bellBtn" onclick="go('notify')" title="Уведомления" aria-label="Уведомления">
+            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 8 3 8H3s3-1 3-8"/><path d="M10.3 20a2 2 0 0 0 3.4 0"/></svg>
+        </button>
         <button class="round-btn" id="calBtn" onclick="go('focus')" title="Календарь">
             <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="4"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>
         </button>
+        </div>
     </div>
 
     <!-- Главная -->
@@ -722,6 +750,13 @@ body{position:relative}
         </div>
     </div>
 
+    <!-- Уведомления -->
+    <div id="tab-notify" class="tab-content">
+        <div class="rep-top"><button class="link-btn" onclick="go('home')">‹ Назад</button></div>
+        <div class="empty-hint" id="notifyMsg" style="display:none"></div>
+        <div id="notifyBody" style="display:none"></div>
+    </div>
+
     <!-- Окно события -->
     <div class="modal-overlay" id="eventModal" onclick="if(event.target === this) closeModal()">
         <div class="modal">
@@ -766,7 +801,7 @@ body{position:relative}
                 <input type="time" id="tfTime" class="glass-input" style="width:100%;flex:none">
                 <div class="modal-label">Напоминание в Telegram (нужно время)</div>
                 <select id="tfRemind" class="glass-input">
-                    <option value="">Нет</option><option value="0">В момент срока</option><option value="10">За 10 минут</option><option value="60">За час</option><option value="1440">За день</option>
+                    <option value="">По настройкам (за 30 и 10 минут)</option><option value="-1">Не напоминать об этой задаче</option>
                 </select>
                 <div class="modal-label">Повторение</div>
                 <select id="repeatSel" class="glass-input" onchange="syncDateLabels()">
@@ -895,10 +930,11 @@ body{position:relative}
             habits: ['Привычки', () => 'Твой ритм и прогресс'],
             goals: ['Цели', () => 'Шаг за шагом к большому'],
             focus: ['Календарь', () => 'Планирование времени'],
-            report: ['Отчёт', () => 'Активность за период']
+            report: ['Отчёт', () => 'Активность за период'],
+            notify: ['Уведомления', () => 'Напоминания и сводки в Telegram']
         };
 
-        const THEME = { home: 'leaves', tasks: 'flowers', habits: 'sprouts', goals: 'trees', focus: 'meadow', report: 'reeds' };
+        const THEME = { home: 'leaves', tasks: 'flowers', habits: 'sprouts', goals: 'trees', focus: 'meadow', report: 'reeds', notify: 'leaves' };
         function setTheme(t) {
             document.querySelectorAll('#plants .scene').forEach(g => g.classList.toggle('on', g.dataset.s === THEME[t]));
         }
@@ -910,6 +946,7 @@ body{position:relative}
             document.getElementById(`tab-${tabId}`).classList.add('active');
             document.querySelectorAll('.tab-btn').forEach(el => el.classList.toggle('active', el.dataset.tab === tabId));
             document.getElementById('calBtn').classList.toggle('active', tabId === 'focus');
+            document.getElementById('bellBtn').classList.toggle('active', tabId === 'notify');
 
             document.getElementById('pageTitle').innerText = TABS[tabId][0];
             document.getElementById('pageSubtitle').innerText = TABS[tabId][1]();
@@ -919,6 +956,7 @@ body{position:relative}
             if (tabId === 'habits') loadHabits();  // отметка «сегодня» и серии зависят от даты — обновляем при каждом открытии
             if (tabId === 'report') renderReport();
             if (tabId === 'goals') loadGoals();
+            if (tabId === 'notify') loadNotify();
             if (tabId === 'focus') {
                 syncCalendarToToday();
                 renderCalendar();
@@ -1030,7 +1068,7 @@ body{position:relative}
 
         const $ = id => document.getElementById(id);
         const PRIO = { 1: 'Низкий', 2: 'Средний', 3: 'Высокий' };
-        const REMIND = { 0: 'В момент срока', 10: 'За 10 минут', 60: 'За час', 1440: 'За день' };
+        const REMIND = { '-1': 'Не напоминать' };
         const REPEAT_NAMES = { none: 'Один раз', daily: 'Ежедневно', weekdays: 'По будням' };
         const SCOPES = { today: 'Сегодня', week: 'Неделя', all: 'Все' };
         let taskScope = 'today', taskPrio = 0, allTasks = [], taskCache = {}, openTaskId = null, editingId = null, formLevel = 2;
@@ -1083,13 +1121,21 @@ body{position:relative}
             if (Array.isArray(d) && d.length) return String(d[0].msg || d[0]);
             return '';
         }
+        // Telegram initData подтверждает пользователя (настройки уведомлений у каждого свои); пояс устройства — для расписания
+        function apiHeaders(json) {
+            const h = {};
+            if (json) h['Content-Type'] = 'application/json';
+            try { const d = window.Telegram && Telegram.WebApp && Telegram.WebApp.initData; if (d) h['X-Telegram-Init-Data'] = d; } catch (e) {}
+            try { const z = Intl.DateTimeFormat().resolvedOptions().timeZone; if (z) h['X-Timezone'] = z; } catch (e) {}
+            return h;
+        }
         async function api(url, method = 'GET', body) {
             const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 15000);
             let r, text;
             try {
                 r = await fetch(url, {
                     method, signal: ctrl.signal,
-                    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+                    headers: apiHeaders(body !== undefined),
                     body: body !== undefined ? JSON.stringify(body) : undefined
                 });
                 text = await r.text();
@@ -1234,7 +1280,7 @@ body{position:relative}
             $('plannedInput').value = t ? t.planned || '' : todayStr();
             $('dueInput').value = t && t.due || '';
             $('tfTime').value = t && t.time || '';
-            $('tfRemind').value = t && t.remind != null ? String(t.remind) : '';
+            $('tfRemind').value = t && t.remind === -1 ? '-1' : '';
             $('repeatSel').value = t ? t.repeat : 'none';
             syncDateLabels();
             $('tfCat').value = t ? t.category : '';
@@ -1261,11 +1307,10 @@ body{position:relative}
             const text = $('taskInput').value.trim();
             if (!text) { toast('Введите название'); return; }
             const time = $('tfTime').value || null, rem = $('tfRemind').value;
-            if (rem !== '' && !time) { toast('Для напоминания укажите время'); return; }
             const body = {
                 text, level: formLevel, repeat: $('repeatSel').value,
                 planned: $('plannedInput').value || null, due: $('dueInput').value || null, today: todayStr(),
-                time, remind: rem === '' ? null : Number(rem),
+                time, remind: rem === '-1' ? -1 : null,
                 category: $('tfCat').value.trim(), note: $('tfNote').value.trim(),
                 subtasks: $('tfSubs').value.split('\n').map(x => x.trim()).filter(Boolean)
             };
@@ -1294,7 +1339,7 @@ body{position:relative}
             const one = t.repeat === 'none';
             const rows = [['Приоритет', PRIO[t.level]], t.created && ['Создана', shortDate(t.created)],
                 [one ? 'План' : 'Начало', shortDate(t.planned)], t.due && [one ? 'Срок' : 'Конец', shortDate(t.due)], t.time && ['Время', t.time],
-                t.remind != null && ['Напоминание', REMIND[t.remind] || ''], ['Повтор', REPEAT_NAMES[t.repeat]], t.category && ['Категория', t.category]].filter(Boolean);
+                t.remind === -1 && ['Напоминание', REMIND[t.remind]], ['Повтор', REPEAT_NAMES[t.repeat]], t.category && ['Категория', t.category]].filter(Boolean);
             const status = t.completed ? '<span class="chip ok">Выполнена</span>'
                 : (t.overdue || t.past_due) ? `${t.overdue ? '<span class="chip bad">Просрочена</span> ' : ''}${t.past_due ? '<span class="chip bad">Срок истёк</span>' : ''}`
                 : '<span class="chip">В работе</span>';
@@ -1428,6 +1473,108 @@ body{position:relative}
             const [f, t] = repRange();
             try { const d = await api(`/api/stats/export?from=${f}&to=${t}&today=${todayStr()}`); toast('Сохранено: ' + d.path); }
             catch (e) { fail(e, 'Не удалось сохранить отчёт'); }
+        }
+
+        // --- УВЕДОМЛЕНИЯ ---
+        const TZ_LIST = ['Europe/Kaliningrad', 'Europe/Moscow', 'Europe/Samara', 'Asia/Yekaterinburg', 'Asia/Omsk', 'Asia/Novosibirsk',
+            'Asia/Krasnoyarsk', 'Asia/Irkutsk', 'Asia/Yakutsk', 'Asia/Vladivostok', 'Asia/Magadan', 'Asia/Kamchatka', 'Europe/Kyiv',
+            'Europe/Minsk', 'Asia/Almaty', 'Asia/Tashkent', 'Asia/Tbilisi', 'Asia/Yerevan', 'Asia/Baku', 'Europe/London', 'Europe/Berlin',
+            'Europe/Paris', 'Europe/Istanbul', 'Asia/Dubai', 'Asia/Kolkata', 'Asia/Bangkok', 'Asia/Shanghai', 'Asia/Tokyo',
+            'Australia/Sydney', 'UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles'];
+        const NT_STATUS = { sent: ['Доставлено', 'ok'], failed: ['Ошибка', 'bad'], skipped: ['Пропущено', ''], cancelled: ['Отменено', ''], pending: ['Повтор', 'warn'], sending: ['Отправка', 'warn'] };
+        let ntState = null;
+
+        async function loadNotify() {
+            const msg = $('notifyMsg'), body = $('notifyBody');
+            try {
+                const d = await api('/api/notifications/settings');
+                ntState = d.settings;
+                msg.style.display = 'none'; body.style.display = '';
+                renderNotify();
+                loadNtHistory();
+            } catch (e) {
+                ntState = null;
+                body.style.display = 'none'; msg.style.display = '';
+                msg.textContent = e instanceof ApiError && e.status ? e.message : 'Не удалось загрузить настройки. Проверьте соединение';
+            }
+        }
+
+        function ntRow(title, sub, key, timeKey) {
+            const s = ntState, dis = key !== 'enabled' && !s.enabled;
+            const on = !!s[key];
+            return `<div class="nt-row ${on && !dis ? '' : 'off'}"><div><div class="nt-t">${title}</div>${sub ? `<div class="nt-s">${sub}</div>` : ''}</div>
+                <div class="nt-ctl">${timeKey ? `<input type="time" class="glass-input" value="${s[timeKey]}" ${on && !dis ? '' : 'disabled'} aria-label="Время: ${title}"
+                    onchange="ntTime('${timeKey}', this.value)">` : ''}
+                <label class="sw"><input type="checkbox" ${on ? 'checked' : ''} ${dis ? 'disabled' : ''} aria-label="${title}" onchange="setNotify({${key}: this.checked})"><i></i></label></div></div>`;
+        }
+
+        function renderNotify() {
+            const s = ntState;
+            const zones = TZ_LIST.includes(s.tz) ? TZ_LIST : [s.tz, ...TZ_LIST];
+            $('notifyBody').innerHTML = `
+                <div class="glass-panel">${ntRow('Все уведомления', 'Общий выключатель для бота и приложения', 'enabled')}</div>
+                <div class="nt-sec">Перед задачей со временем</div>
+                <div class="glass-panel">${ntRow('За 30 минут', '', 'remind_30')}${ntRow('За 10 минут', '', 'remind_10')}</div>
+                <div class="nt-sec">Сводки</div>
+                <div class="glass-panel">${ntRow('Утренний план', 'Задачи и события на сегодня', 'morning_on', 'morning_time')}
+                    ${ntRow('Вечерний итог', 'Сколько сделано и что осталось', 'evening_on', 'evening_time')}
+                    ${ntRow('Просроченные задачи', 'Одно сообщение в день', 'overdue_on', 'overdue_time')}</div>
+                <div class="nt-sec">Часовой пояс</div>
+                <div class="glass-panel">
+                    <div class="nt-row"><div><div class="nt-t">Определять автоматически</div><div class="nt-s">По часовому поясу этого устройства</div></div>
+                        <div class="nt-ctl"><label class="sw"><input type="checkbox" ${s.tz_auto ? 'checked' : ''} aria-label="Определять часовой пояс автоматически" onchange="setNotify({tz_auto: this.checked})"><i></i></label></div></div>
+                    <select class="glass-input" style="width:100%;margin-top:6px" ${s.tz_auto ? 'disabled' : ''} aria-label="Часовой пояс" onchange="setNotify({tz: this.value})">
+                        ${zones.map(z => `<option value="${escapeHtml(z)}" ${z === s.tz ? 'selected' : ''}>${escapeHtml(z)}</option>`).join('')}</select>
+                    <div class="nt-s" style="margin-top:8px">Сейчас: ${escapeHtml(s.tz)}. Все времена выше — по этому поясу.</div>
+                </div>
+                <button class="ghost-btn modal-save" style="width:100%" onclick="sendNtTest()">Отправить тестовое сообщение</button>
+                <div class="nt-sec">История отправок</div>
+                <div class="glass-panel"><div class="nt-hist" id="ntHist"><div class="empty-hint">Загрузка…</div></div></div>`;
+            if (ntHistCache) paintNtHistory(ntHistCache);
+        }
+
+        let ntSaving = Promise.resolve();
+        function setNotify(patch) {
+            // изменения идут по очереди, чтобы быстрые переключения не перетирали друг друга
+            ntSaving = ntSaving.then(async () => {
+                const prev = { ...ntState };
+                Object.assign(ntState, patch); renderNotify();
+                try {
+                    const d = await api('/api/notifications/settings', 'PUT', patch);
+                    ntState = d.settings;
+                    if (patch.tz_auto === true) { await loadNotify(); return; }  // сервер подхватит пояс устройства
+                    renderNotify(); toast('Сохранено');
+                } catch (e) { ntState = prev; renderNotify(); fail(e, 'Не удалось сохранить настройку'); }
+            });
+            return ntSaving;
+        }
+        function ntTime(key, value) {
+            if (/^\d{2}:\d{2}$/.test(value)) setNotify({ [key]: value }); else renderNotify();
+        }
+
+        let ntHistCache = null;
+        function paintNtHistory(history) {
+            const box = $('ntHist');
+            if (!box) return;
+            box.innerHTML = history.length ? history.map(h => {
+                const [label, cls] = NT_STATUS[h.status] || [h.status, ''];
+                const what = h.title ? `${escapeHtml(h.title)}${h.offset ? ` · за ${h.offset} мин` : ''}` : '';
+                return `<div class="nt-h"><span class="chip ${cls}">${label}</span><b>${escapeHtml(h.label)}</b> <span class="nt-s">${escapeHtml(h.when)}</span>
+                    ${what ? `<div class="nt-s">${what}</div>` : ''}${h.detail ? `<div class="nt-s">${escapeHtml(h.detail)}</div>` : ''}</div>`;
+            }).join('') : '<div class="empty-hint">Пока ничего не отправлялось</div>';
+        }
+        async function loadNtHistory() {
+            try {
+                const { history } = await api('/api/notifications/history?limit=30');
+                ntHistCache = history;
+                paintNtHistory(history);
+            } catch (e) { if ($('ntHist')) $('ntHist').innerHTML = '<div class="empty-hint">Не удалось загрузить историю</div>'; }
+        }
+
+        async function sendNtTest() {
+            try { await api('/api/notifications/test', 'POST', {}); toast('Тест отправлен в Telegram'); }
+            catch (e) { fail(e, 'Не удалось отправить тест'); }
+            loadNtHistory();
         }
 
         // --- ПРИВЫЧКИ ---
