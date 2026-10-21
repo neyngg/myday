@@ -2051,6 +2051,14 @@ NOTIFY_MIGRATIONS = [
         "CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks (user_id)",
         "CREATE INDEX IF NOT EXISTS idx_completions_user_day ON completions (user_id, day)",
     ]),
+    # Одноразовый сброс: удаляет все задачи, созданные до появления владельцев (user_id), чтобы новые
+    # пользователи не наследовали чужие старые задачи. Выполняется один раз и больше не повторяется.
+    ("notifications_003_reset_tasks", [
+        "DELETE FROM subtasks",
+        "DELETE FROM completions",
+        "DELETE FROM tasks",
+        "DELETE FROM notification_log WHERE task_id IS NOT NULL",
+    ]),
 ]
 
 
