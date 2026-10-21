@@ -610,6 +610,23 @@ body{position:relative}
 .modal-head .modal-title#modalDate{flex:1;text-align:center;font-size:17px;line-height:1.2;padding:0 4px}
 .day-nav{width:44px;height:44px;flex-shrink:0;border:none;border-radius:50%;background:var(--bg,rgba(0,0,0,.05));color:var(--ink);font-size:26px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0 0 3px}
 .day-nav:active{transform:scale(.92)}
+
+/* ===== привычки: отметка и серия ===== */
+.habit-item{gap:6px}
+.habit-item .task-left{flex:1;min-width:0;align-items:flex-start}
+.habit-item .chk-hit{margin-top:-2px}
+.habit-item .task-body{min-height:44px;justify-content:flex-start;padding-top:2px}
+.week-dots{display:flex;gap:2px;margin:4px 0 -4px -4px;max-width:320px}
+.wd{flex:1;min-width:0;min-height:44px;background:none;border:none;padding:6px 0 2px;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:4px;color:var(--ink-2);font:inherit;font-size:10px;font-weight:600;cursor:pointer}
+.wd i{display:block;width:14px;height:14px;border-radius:50%;border:2px solid var(--ink-2);opacity:.5;transition:background .2s,opacity .2s}
+.wd.on i{background:var(--green);border-color:var(--green);opacity:1}
+.wd.today span{color:var(--ink);font-weight:800}
+.wd.today i{opacity:.9}
+
+/* тост: длинные тексты ошибок сервера переносятся по словам, а не по буквам */
+.toast{width:max-content;text-align:center;word-break:normal;overflow-wrap:anywhere}
+.toast.has-act{pointer-events:auto}
+.toast-act{margin-left:14px;min-height:32px;padding:0 4px;background:none;border:0;color:var(--pink);font:inherit;font-size:14px!important;font-weight:800;cursor:pointer}
 </style>
 </head>
 <body>
@@ -735,15 +752,15 @@ body{position:relative}
                 <span class="modal-title" id="tfHead">Новая задача</span>
                 <button class="btn-delete" onclick="closeNewTask()" title="Закрыть" aria-label="Закрыть">✕</button>
             </div>
-            <input type="text" id="taskInput" class="glass-input" placeholder="Название задачи" onkeydown="if(event.key === 'Enter') submitTask()">
+            <input type="text" id="taskInput" class="glass-input" placeholder="Название задачи" enterkeyhint="done" onkeydown="if(event.key === 'Enter' && !event.isComposing){ event.preventDefault(); submitTask(!editingId); }">
             <div class="modal-label">Приоритет</div>
             <div class="seg" id="tfPrio" style="margin:0"></div>
             <details>
                 <summary>Дополнительно</summary>
-                <div class="modal-label">Срок</div>
+                <div class="modal-label">Даты</div>
                 <div class="modal-row">
-                    <label class="date-field">С<input type="date" id="startInput" class="glass-input"></label>
-                    <label class="date-field">До<input type="date" id="untilInput" class="glass-input"></label>
+                    <label class="date-field"><span id="plannedLbl">План на</span><input type="date" id="plannedInput" class="glass-input"></label>
+                    <label class="date-field"><span id="dueLbl">Срок до</span><input type="date" id="dueInput" class="glass-input"></label>
                 </div>
                 <div class="modal-label">Время</div>
                 <input type="time" id="tfTime" class="glass-input" style="width:100%;flex:none">
@@ -752,7 +769,7 @@ body{position:relative}
                     <option value="">Нет</option><option value="0">В момент срока</option><option value="10">За 10 минут</option><option value="60">За час</option><option value="1440">За день</option>
                 </select>
                 <div class="modal-label">Повторение</div>
-                <select id="repeatSel" class="glass-input">
+                <select id="repeatSel" class="glass-input" onchange="syncDateLabels()">
                     <option value="none">Один раз</option><option value="daily">Ежедневно</option><option value="weekdays">По будням</option>
                 </select>
                 <div class="modal-label">Категория</div>
@@ -899,6 +916,7 @@ body{position:relative}
 
             if (tabId === 'home') renderHome();
             if (tabId === 'tasks') loadTasks();
+            if (tabId === 'habits') loadHabits();  // отметка «сегодня» и серии зависят от даты — обновляем при каждом открытии
             if (tabId === 'report') renderReport();
             if (tabId === 'goals') loadGoals();
             if (tabId === 'focus') {
@@ -942,13 +960,13 @@ body{position:relative}
             let tasks = [], evs = [], gl = [];
             try {
                 const [t, e, g] = await Promise.all([
-                    fetch(`/api/tasks?today=${today}`).then(r => r.json()),
-                    fetch(`/api/events?month=${today.slice(0, 7)}`).then(r => r.json()),
-                    fetch('/api/goals').then(r => r.json())
+                    api(`/api/tasks?today=${today}`),
+                    api(`/api/events?month=${today.slice(0, 7)}`),
+                    api('/api/goals')
                 ]);
-                tasks = t.tasks; evs = e.events.filter(x => x.date === today); gl = g.goals;
+                tasks = vis('task', t.tasks); evs = vis('event', e.events.filter(x => x.date === today)); gl = vis('goal', g.goals);
             } catch (err) {
-                console.error('Ошибка загрузки главной:', err);
+                fail(err, 'Не удалось загрузить главную');
             }
 
             cacheTasks(tasks);
@@ -1018,15 +1036,77 @@ body{position:relative}
         let taskScope = 'today', taskPrio = 0, allTasks = [], taskCache = {}, openTaskId = null, editingId = null, formLevel = 2;
 
         function cacheTasks(l) { l.forEach(t => taskCache[t.id] = t); }
-        function toast(msg) {
-            const t = $('toast'); t.textContent = msg; t.classList.add('on');
-            clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('on'), 2800);
+        // action = { label, fn, ms } — кнопка в тосте (например «Отменить»)
+        function toast(msg, action) {
+            const t = $('toast'); t.textContent = msg;
+            if (action) {
+                const b = document.createElement('button');
+                b.className = 'toast-act'; b.textContent = action.label;
+                b.onclick = () => { t.classList.remove('on'); clearTimeout(toast.t); action.fn(); };
+                t.appendChild(b);
+            }
+            t.classList.toggle('has-act', !!action);
+            t.classList.add('on');
+            clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('on'), action ? (action.ms || 5000) : 2800);
+        }
+
+        // Удаление с отменой: элемент сразу скрывается, а на сервере удаляется через 5 секунд, если не нажали «Отменить»
+        const pendingDel = new Map();
+        const vis = (kind, list) => list.filter(x => !pendingDel.has(kind + ':' + x.id));
+        function deferDelete(kind, id, url, msg, rerender) {
+            const key = kind + ':' + id;
+            if (pendingDel.has(key)) return;
+            const entry = { url, rerender, busy: false };
+            entry.timer = setTimeout(() => commitDelete(key), 5000);
+            pendingDel.set(key, entry);
+            rerender();
+            toast(msg, { label: 'Отменить', ms: 5000, fn: () => { clearTimeout(entry.timer); pendingDel.delete(key); rerender(); } });
+        }
+        async function commitDelete(key) {
+            const e = pendingDel.get(key);
+            if (!e || e.busy) return;
+            e.busy = true; clearTimeout(e.timer);
+            try { await api(e.url, 'DELETE'); pendingDel.delete(key); }
+            catch (err) { pendingDel.delete(key); fail(err, 'Не удалось удалить'); e.rerender(); }
+        }
+        // уходим из приложения — не теряем отложенные удаления
+        const flushDeletes = () => [...pendingDel.keys()].forEach(commitDelete);
+        document.addEventListener('visibilitychange', () => { if (document.hidden) flushDeletes(); });
+        window.addEventListener('pagehide', flushDeletes);
+        // Единственная точка работы с сервером: одинаковые таймаут, разбор ответа и тексты ошибок для всех экранов.
+        class ApiError extends Error {
+            constructor(message, status) { super(message); this.status = status; }
+        }
+        function apiDetail(data) {
+            const d = data && data.detail;
+            if (typeof d === 'string') return d;
+            if (Array.isArray(d) && d.length) return String(d[0].msg || d[0]);
+            return '';
         }
         async function api(url, method = 'GET', body) {
-            const r = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
-            if (!r.ok) throw new Error(r.status);
-            return r.json();
+            const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 15000);
+            let r, text;
+            try {
+                r = await fetch(url, {
+                    method, signal: ctrl.signal,
+                    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+                    body: body !== undefined ? JSON.stringify(body) : undefined
+                });
+                text = await r.text();
+            } catch (e) {
+                throw new ApiError(e.name === 'AbortError' ? 'Сервер долго не отвечает' : 'Нет связи с сервером', 0);
+            } finally { clearTimeout(timer); }
+            let data = null;
+            try { data = text ? JSON.parse(text) : null; } catch (e) { /* не JSON */ }
+            if (!r.ok) throw new ApiError(apiDetail(data) || `Ошибка сервера (${r.status})`, r.status);
+            return data === null ? {} : data;
         }
+        // Показывает пользователю причину: текст сервера для понятных отказов (4xx), иначе общее сообщение
+        function fail(e, fallback) {
+            if (e instanceof ApiError && (e.status === 0 || (e.status >= 400 && e.status < 500))) toast(e.message);
+            else { toast(fallback); console.error(e); }
+        }
+        const plural = (n, f) => f[n % 10 === 1 && n % 100 !== 11 ? 0 : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? 1 : 2)];
         function addDays(k, n) {
             const d = new Date(k + 'T00:00:00'); d.setDate(d.getDate() + n);
             return dateKey(d.getFullYear(), d.getMonth(), d.getDate());
@@ -1045,7 +1125,7 @@ body{position:relative}
             list.innerHTML = '<div class="empty-hint">Загрузка…</div>';
             try {
                 const d = await api(`/api/tasks?today=${todayStr()}&scope=${taskScope}`);
-                allTasks = d.tasks; cacheTasks(allTasks); applyTasks();
+                allTasks = vis('task', d.tasks); cacheTasks(allTasks); applyTasks();
             } catch (err) {
                 list.innerHTML = '<div class="empty-card">Не удалось загрузить задачи.<br><button class="glass-btn" onclick="loadTasks()">Повторить</button></div>';
             }
@@ -1056,7 +1136,7 @@ body{position:relative}
             let l = allTasks.filter(t => !taskPrio || t.level === taskPrio);
             const by = {
                 prio: (a, b) => b.level - a.level,
-                due: (a, b) => ((a.until || '9') + (a.time || '')).localeCompare((b.until || '9') + (b.time || '')),
+                due: (a, b) => ((a.due || '9') + (a.time || '')).localeCompare((b.due || '9') + (b.time || '')),
                 name: (a, b) => a.text.localeCompare(b.text, 'ru')
             };
             if (by[sort]) l = [...l].sort((a, b) => a.completed - b.completed || by[sort](a, b));
@@ -1083,20 +1163,26 @@ body{position:relative}
         function taskRow(t) {
             const parts = [];
             if (t.time) parts.push(t.time);
-            if (t.until) parts.push((t.overdue ? 'просрочено · ' : '') + 'до ' + shortDate(t.until));
-            if (t.repeat !== 'none') parts.push(REPEAT_NAMES[t.repeat]);
+            if (t.repeat === 'none') {
+                if (t.overdue) parts.push('просрочено · было на ' + shortDate(t.planned));
+                else if (t.planned > todayStr()) parts.push('на ' + shortDate(t.planned));
+                if (t.due) parts.push((t.past_due ? 'срок истёк · ' : '') + 'до ' + shortDate(t.due));
+            } else {
+                parts.push(REPEAT_NAMES[t.repeat]);
+                if (t.due) parts.push('до ' + shortDate(t.due));
+            }
             if (t.category) parts.push(escapeHtml(t.category));
             const n = t.subs.length, dn = t.subs.filter(x => x.done).length;
             const open = n > 0 && expandedTasks.has(t.id);
             const item = document.createElement('div');
             item.dataset.tid = t.id;
-            item.className = `task-item ${n ? 'has-subs' : ''} ${t.completed ? 'completed' : ''} ${t.overdue ? 'overdue' : ''} priority-${t.priority}`;
+            item.className = `task-item ${n ? 'has-subs' : ''} ${t.completed ? 'completed' : ''} ${t.overdue || t.past_due ? 'overdue' : ''} priority-${t.priority}`;
             item.innerHTML = `
                 <div class="task-left">
-                    <div class="chk-hit" onclick="toggleTask(${t.id})" role="checkbox" aria-checked="${!!t.completed}" aria-label="Выполнено"><div class="checkbox ${t.completed ? 'checked' : ''}"></div></div>
+                    <div class="chk-hit" onclick="event.stopPropagation(); toggleTask(${t.id})" role="checkbox" aria-checked="${!!t.completed}" aria-label="Выполнено"><div class="checkbox ${t.completed ? 'checked' : ''}"></div></div>
                     <div class="task-body" onclick="openTask(${t.id})">
                         <span class="task-text">${t.priority ? '<span class="chip">Важно</span>' : ''}${escapeHtml(t.text)}</span>
-                        ${parts.length ? `<span class="task-meta ${t.overdue ? 'overdue' : ''}">${parts.join(' · ')}</span>` : ''}
+                        ${parts.length ? `<span class="task-meta ${t.overdue || t.past_due ? 'overdue' : ''}">${parts.join(' · ')}</span>` : ''}
                         ${n ? `<div class="progress mini"><div style="width:${Math.round(dn / n * 100)}%"></div></div>` : ''}
                     </div>
                 </div>
@@ -1114,21 +1200,23 @@ body{position:relative}
 
         async function toggleTask(id) {
             try { await api(`/api/tasks/${id}/toggle?today=${todayStr()}`, 'POST'); await refreshTasks(); }
-            catch (e) { toast('Не удалось обновить задачу'); }
+            catch (e) { fail(e, 'Не удалось обновить задачу'); }
         }
 
         async function quickAdd() {
             const i = $('quickInput'), text = i.value.trim();
             if (!text) return;
-            try { await api('/api/tasks', 'POST', { text, repeat: 'none', level: 2 }); i.value = ''; await refreshTasks(); }
-            catch (e) { toast('Не удалось добавить задачу'); }
+            try { await api('/api/tasks', 'POST', { text, repeat: 'none', level: 2, today: todayStr() }); i.value = ''; await refreshTasks(); i.focus(); }
+            catch (e) { fail(e, 'Не удалось добавить задачу'); }
         }
 
         async function carryOver() {
             const n = allTasks.filter(t => t.overdue).length;
             if (!confirm(`Перенести просроченные задачи (${n}) на сегодня?`)) return;
-            try { await api(`/api/tasks/carry-over?today=${todayStr()}`, 'POST'); await refreshTasks(); toast('Задачи перенесены на сегодня'); }
-            catch (e) { toast('Не удалось перенести'); }
+            try {
+                const r = await api(`/api/tasks/carry-over?today=${todayStr()}`, 'POST');
+                await refreshTasks(); toast(r.moved ? `Перенесено на сегодня: ${r.moved}` : 'Просроченных задач нет');
+            } catch (e) { fail(e, 'Не удалось перенести'); }
         }
 
         // --- форма задачи ---
@@ -1143,11 +1231,12 @@ body{position:relative}
             $('tfHead').textContent = t ? 'Изменить задачу' : 'Новая задача';
             $('tfSave').textContent = t ? 'Сохранить' : 'Добавить задачу';
             $('taskInput').value = t ? t.text : '';
-            $('startInput').value = t && t.start || '';
-            $('untilInput').value = t && t.until || '';
+            $('plannedInput').value = t ? t.planned || '' : todayStr();
+            $('dueInput').value = t && t.due || '';
             $('tfTime').value = t && t.time || '';
             $('tfRemind').value = t && t.remind != null ? String(t.remind) : '';
             $('repeatSel').value = t ? t.repeat : 'none';
+            syncDateLabels();
             $('tfCat').value = t ? t.category : '';
             $('tfNote').value = t ? t.note : '';
             $('tfSubs').value = '';
@@ -1157,26 +1246,40 @@ body{position:relative}
             $('newTaskModal').classList.add('open');
             $('taskInput').focus();
         }
+        // Для разовой задачи это «план» и «срок», для повторяющейся — начало и конец серии
+        function syncDateLabels() {
+            const one = $('repeatSel').value === 'none';
+            $('plannedLbl').textContent = one ? 'План на' : 'Начало';
+            $('dueLbl').textContent = one ? 'Срок до' : 'Конец';
+        }
         function closeNewTask() { $('newTaskModal').classList.remove('open'); }
 
-        async function submitTask() {
+        let taskSaving = false;
+        // keepOpen: после сохранения НОВОЙ задачи форма очищается, фокус возвращается в поле названия (режим Enter)
+        async function submitTask(keepOpen = false) {
+            if (taskSaving) return;
             const text = $('taskInput').value.trim();
             if (!text) { toast('Введите название'); return; }
             const time = $('tfTime').value || null, rem = $('tfRemind').value;
             if (rem !== '' && !time) { toast('Для напоминания укажите время'); return; }
             const body = {
                 text, level: formLevel, repeat: $('repeatSel').value,
-                start: $('startInput').value || null, until: $('untilInput').value || null,
+                planned: $('plannedInput').value || null, due: $('dueInput').value || null, today: todayStr(),
                 time, remind: rem === '' ? null : Number(rem),
                 category: $('tfCat').value.trim(), note: $('tfNote').value.trim(),
                 subtasks: $('tfSubs').value.split('\n').map(x => x.trim()).filter(Boolean)
             };
-            if (body.start && body.until && body.start > body.until) [body.start, body.until] = [body.until, body.start];
+            if (body.repeat !== 'none' && body.planned && body.due && body.due < body.planned) { toast('Конец повтора раньше начала'); return; }
+            const wasEdit = !!editingId;
+            taskSaving = true;
             try {
-                if (editingId) await api(`/api/tasks/${editingId}`, 'PUT', body); else await api('/api/tasks', 'POST', body);
-                closeNewTask(); await refreshTasks();
-                toast(editingId ? 'Изменения сохранены' : 'Задача добавлена');
-            } catch (e) { toast('Не удалось сохранить задачу'); }
+                if (wasEdit) await api(`/api/tasks/${editingId}`, 'PUT', body); else await api('/api/tasks', 'POST', body);
+                if (!wasEdit && keepOpen) openTaskForm(null);  // чистая форма, фокус в поле названия
+                else closeNewTask();
+                await refreshTasks();
+                toast(wasEdit ? 'Изменения сохранены' : 'Задача добавлена');
+            } catch (e) { fail(e, 'Не удалось сохранить задачу'); }
+            finally { taskSaving = false; }
         }
 
         // --- карточка задачи ---
@@ -1188,9 +1291,14 @@ body{position:relative}
             if (!t) { closeTask(); return; }
             const n = t.subs.length, dn = t.subs.filter(x => x.done).length;
             const pct = n ? Math.round(dn / n * 100) : (t.completed ? 100 : 0);
-            const rows = [['Приоритет', PRIO[t.level]], t.until && ['Срок', shortDate(t.until)], t.time && ['Время', t.time],
+            const one = t.repeat === 'none';
+            const rows = [['Приоритет', PRIO[t.level]], t.created && ['Создана', shortDate(t.created)],
+                [one ? 'План' : 'Начало', shortDate(t.planned)], t.due && [one ? 'Срок' : 'Конец', shortDate(t.due)], t.time && ['Время', t.time],
                 t.remind != null && ['Напоминание', REMIND[t.remind] || ''], ['Повтор', REPEAT_NAMES[t.repeat]], t.category && ['Категория', t.category]].filter(Boolean);
-            const status = t.completed ? '<span class="chip ok">Выполнена</span>' : t.overdue ? '<span class="chip bad">Просрочена</span>' : '<span class="chip">В работе</span>';
+            const status = t.completed ? '<span class="chip ok">Выполнена</span>'
+                : (t.overdue || t.past_due) ? `${t.overdue ? '<span class="chip bad">Просрочена</span> ' : ''}${t.past_due ? '<span class="chip bad">Срок истёк</span>' : ''}`
+                : '<span class="chip">В работе</span>';
+            const canMove = one && !t.completed;
             $('taskDetail').innerHTML = `
                 <div class="modal-head"><span class="modal-title" style="text-transform:none;word-break:break-word">${escapeHtml(t.text)}</span><button class="btn-delete" onclick="closeTask()" aria-label="Закрыть">✕</button></div>
                 <div>${status}</div>
@@ -1200,13 +1308,13 @@ body{position:relative}
                 <div class="progress"><div style="width:${pct}%"></div></div>
                 <div class="subs">${t.subs.map(x => `<div class="sub"><div class="chk-hit" onclick="toggleSub(${x.id})" role="checkbox" aria-checked="${x.done}"><div class="checkbox ${x.done ? 'checked' : ''}"></div></div><span class="${x.done ? 'sdone' : ''}">${escapeHtml(x.text)}</span><button class="btn-delete" onclick="delSub(${x.id})" aria-label="Удалить подзадачу">${TRASH}</button></div>`).join('')}</div>
                 <div class="modal-row"><input id="subInput" class="glass-input" placeholder="Новая подзадача" onkeydown="if(event.key === 'Enter') addSub()"><button class="glass-btn" style="padding:0 16px" onclick="addSub()">Добавить</button></div>
-                <div class="goal-actions"><button class="glass-btn" onclick="editTask()">Изменить</button><button class="ghost-btn" onclick="dupTask()">Дублировать</button><button class="ghost-btn" onclick="$('moveRow').classList.toggle('open')">Перенести</button></div>
-                <div class="move-row" id="moveRow"><input type="date" id="moveDate" class="glass-input" value="${todayStr()}"><button class="glass-btn" onclick="moveTask()">Готово</button></div>
+                <div class="goal-actions"><button class="glass-btn" onclick="editTask()">Изменить</button><button class="ghost-btn" onclick="dupTask()">Дублировать</button>${canMove ? `<button class="ghost-btn" onclick="$('moveRow').classList.toggle('open')">Перенести</button>` : ''}</div>
+                ${canMove ? `<div class="move-row" id="moveRow"><input type="date" id="moveDate" class="glass-input" min="${todayStr()}" value="${addDays(todayStr(), 1)}"><button class="glass-btn" onclick="moveTask()">Готово</button></div>` : ''}
                 <button class="ghost-btn modal-save" style="color:var(--danger)" onclick="deleteTask(${t.id})">Удалить задачу</button>`;
         }
 
         async function subCall(fn, err) {
-            try { await fn(); await refreshTasks(); } catch (e) { toast(err); }
+            try { await fn(); await refreshTasks(); } catch (e) { fail(e, err); }
         }
         async function addSub() {
             const text = $('subInput').value.trim(); if (!text) return;
@@ -1219,17 +1327,16 @@ body{position:relative}
         function editTask() { const t = taskCache[openTaskId]; closeTask(); openTaskForm(t); }
         async function dupTask() {
             try { await api(`/api/tasks/${openTaskId}/duplicate`, 'POST'); closeTask(); await refreshTasks(); toast('Задача продублирована'); }
-            catch (e) { toast('Не удалось продублировать'); }
+            catch (e) { fail(e, 'Не удалось продублировать'); }
         }
         async function moveTask() {
             const to = $('moveDate').value; if (!to) return;
-            try { await api(`/api/tasks/${openTaskId}/move`, 'POST', { to }); closeTask(); await refreshTasks(); toast('Перенесено на ' + shortDate(to)); }
-            catch (e) { toast('Не удалось перенести'); }
+            try { await api(`/api/tasks/${openTaskId}/move`, 'POST', { to, today: todayStr() }); closeTask(); await refreshTasks(); toast('Перенесено на ' + shortDate(to)); }
+            catch (e) { fail(e, 'Не удалось перенести'); }
         }
-        async function deleteTask(id) {
-            if (!confirm('Удалить задачу? История выполнения в отчётах сохранится.')) return;
-            try { await api(`/api/tasks/${id}`, 'DELETE'); closeTask(); await refreshTasks(); }
-            catch (e) { toast('Не удалось удалить задачу'); }
+        function deleteTask(id) {
+            closeTask();
+            deferDelete('task', id, `/api/tasks/${id}`, 'Задача удалена', refreshTasks);
         }
 
         // --- графики ---
@@ -1320,19 +1427,27 @@ body{position:relative}
         async function exportReport() {
             const [f, t] = repRange();
             try { const d = await api(`/api/stats/export?from=${f}&to=${t}&today=${todayStr()}`); toast('Сохранено: ' + d.path); }
-            catch (e) { toast('Не удалось сохранить отчёт'); }
+            catch (e) { fail(e, 'Не удалось сохранить отчёт'); }
         }
 
         // --- ПРИВЫЧКИ ---
+        let habitsData = [];
+        const habitBusy = new Set();
+
         async function loadHabits() {
             try {
-                const res = await fetch('/api/habits');
-                const data = await res.json();
-                renderHabits(data.habits);
+                habitsData = vis('habit', (await api(`/api/habits?today=${todayStr()}`)).habits);
+                renderHabits(habitsData);
             } catch (err) {
-                console.error('Ошибка загрузки привычек:', err);
+                fail(err, 'Не удалось загрузить привычки');
                 document.getElementById('habitList').innerHTML = '<div class="empty-hint">Не удалось загрузить привычки</div>';
             }
+        }
+
+        function habitMeta(h) {
+            if (h.streak > 0) return `🔥 ${h.streak} ${plural(h.streak, ['день', 'дня', 'дней'])} подряд · рекорд ${h.best} · всего ${h.total}`;
+            if (h.total > 0) return `Серия прервана · рекорд ${h.best} · всего ${h.total}`;
+            return 'Отметьте сегодня — начнётся серия';
         }
 
         function renderHabits(habits) {
@@ -1344,15 +1459,37 @@ body{position:relative}
                 return;
             }
 
+            const today = todayStr();
             habits.forEach(habit => {
                 const item = document.createElement('div');
                 item.className = 'habit-item';
                 item.innerHTML = `
-                    <span class="task-text">${escapeHtml(habit.text)}</span>
+                    <div class="task-left">
+                        <div class="chk-hit" onclick="toggleHabit(${habit.id})" role="checkbox" aria-checked="${habit.done_today}" aria-label="Выполнено сегодня"><div class="checkbox ${habit.done_today ? 'checked' : ''}"></div></div>
+                        <div class="task-body" style="cursor:default">
+                            <span class="task-text">${escapeHtml(habit.text)}</span>
+                            <span class="task-meta">${habitMeta(habit)}</span>
+                            <div class="week-dots">${habit.week.map(d => `<button type="button" class="wd ${d.done ? 'on' : ''} ${d.date === today ? 'today' : ''}" onclick="toggleHabit(${habit.id}, '${d.date}')" aria-pressed="${d.done}" aria-label="${shortDate(d.date)}: ${d.done ? 'выполнено' : 'не выполнено'}"><i></i><span>${DAYS[(new Date(d.date + 'T00:00').getDay() + 6) % 7]}</span></button>`).join('')}</div>
+                        </div>
+                    </div>
                     <button class="btn-delete" onclick="deleteHabit(${habit.id})" title="Удалить" aria-label="Удалить">${TRASH}</button>
                 `;
                 list.appendChild(item);
             });
+        }
+
+        // Отметка выполнения за день (по умолчанию сегодня); серии считает сервер по журналу
+        async function toggleHabit(id, day) {
+            const key = `${id}:${day || ''}`;
+            if (habitBusy.has(key)) return;
+            habitBusy.add(key);
+            try {
+                const r = await api(`/api/habits/${id}/toggle?today=${todayStr()}${day ? '&day=' + day : ''}`, 'POST');
+                habitsData = habitsData.map(h => h.id === id ? r.habit : h);
+                renderHabits(habitsData);
+            } catch (err) {
+                fail(err, 'Не удалось отметить привычку');
+            } finally { habitBusy.delete(key); }
         }
 
         function openNewHabit() {
@@ -1366,29 +1503,19 @@ body{position:relative}
         async function submitHabit() {
             const input = document.getElementById('habitInput');
             const text = input.value.trim();
-            if (!text) return;
+            if (!text) { toast('Введите название привычки'); return; }
 
             try {
-                await fetch('/api/habits', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text })
-                });
+                await api('/api/habits', 'POST', { text });
                 closeNewHabit();
                 await loadHabits();
             } catch (err) {
-                console.error('Ошибка добавления привычки:', err);
+                fail(err, 'Не удалось добавить привычку');
             }
         }
 
-        async function deleteHabit(id) {
-            if (!confirm('Удалить привычку?')) return;
-            try {
-                await fetch(`/api/habits/${id}`, { method: 'DELETE' });
-                await loadHabits();
-            } catch (err) {
-                console.error('Ошибка удаления привычки:', err);
-            }
+        function deleteHabit(id) {
+            deferDelete('habit', id, `/api/habits/${id}`, 'Привычка удалена', loadHabits);
         }
 
         // --- ЦЕЛИ ---
@@ -1419,12 +1546,10 @@ body{position:relative}
 
         async function loadGoals() {
             try {
-                const res = await fetch('/api/goals');
-                const data = await res.json();
-                goals = data.goals;
+                goals = vis('goal', (await api('/api/goals')).goals);
                 renderGoals();
             } catch (err) {
-                console.error('Ошибка загрузки целей:', err);
+                fail(err, 'Не удалось загрузить цели');
                 document.getElementById('goalList').innerHTML = '<div class="empty-hint">Не удалось загрузить цели</div>';
             }
         }
@@ -1458,20 +1583,17 @@ body{position:relative}
         async function submitGoal() {
             const title = document.getElementById('goalTitle').value.trim();
             const target = parseFloat(document.getElementById('goalTarget').value);
-            if (!title || !(target > 0)) return;
+            if (!title) { toast('Введите название цели'); return; }
+            if (!(target > 0)) { toast('Значение цели должно быть больше нуля'); return; }
             const unit = document.getElementById('goalUnit').value.trim();
             const current = parseFloat(document.getElementById('goalStart').value) || 0;
 
             try {
-                await fetch('/api/goals', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ title, target, unit, emoji: goalEmoji, current })
-                });
+                await api('/api/goals', 'POST', { title, target, unit, emoji: goalEmoji, current });
                 closeNewGoal();
                 await refreshGoalViews();
             } catch (err) {
-                console.error('Ошибка создания цели:', err);
+                fail(err, 'Не удалось создать цель');
             }
         }
 
@@ -1497,32 +1619,24 @@ body{position:relative}
 
         async function updateGoal(mode, sign) {
             const raw = parseFloat(document.getElementById('goalAmount').value);
-            if (isNaN(raw) || !activeGoalId) return;
+            if (!activeGoalId) return;
+            if (isNaN(raw)) { toast('Введите число'); return; }
             try {
-                await fetch(`/api/goals/${activeGoalId}/progress`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ mode, value: raw * sign })
-                });
+                await api(`/api/goals/${activeGoalId}/progress`, 'POST', { mode, value: raw * sign });
                 document.getElementById('goalAmount').value = '';
-                const res = await fetch('/api/goals');
-                goals = (await res.json()).goals;
+                goals = vis('goal', (await api('/api/goals')).goals);
                 fillGoalModal();
                 if (currentTab === 'goals') renderGoals(); else if (currentTab === 'home') renderHome();
             } catch (err) {
-                console.error('Ошибка обновления цели:', err);
+                fail(err, 'Не удалось обновить цель');
             }
         }
 
-        async function deleteGoal() {
-            if (!activeGoalId || !confirm('Удалить цель?')) return;
-            try {
-                await fetch(`/api/goals/${activeGoalId}`, { method: 'DELETE' });
-                closeGoalModal();
-                await refreshGoalViews();
-            } catch (err) {
-                console.error('Ошибка удаления цели:', err);
-            }
+        function deleteGoal() {
+            if (!activeGoalId) return;
+            const id = activeGoalId;
+            closeGoalModal();
+            deferDelete('goal', id, `/api/goals/${id}`, 'Цель удалена', refreshGoalViews);
         }
 
         // --- КАЛЕНДАРЬ ---
@@ -1561,13 +1675,12 @@ body{position:relative}
         async function loadEvents() {
             eventsByDate = {};
             try {
-                const res = await fetch(`/api/events?month=${viewYear}-${pad(viewMonth + 1)}`);
-                const data = await res.json();
-                data.events.forEach(e => {
+                const data = await api(`/api/events?month=${viewYear}-${pad(viewMonth + 1)}`);
+                vis('event', data.events).forEach(e => {
                     (eventsByDate[e.date] = eventsByDate[e.date] || []).push(e);
                 });
             } catch (err) {
-                console.error('Ошибка загрузки событий:', err);
+                fail(err, 'Не удалось загрузить события');
             }
         }
 
@@ -1682,29 +1795,21 @@ body{position:relative}
             const time = document.getElementById('eventTime').value || null;
 
             try {
-                await fetch('/api/events', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ date: modalDateKey, title, time, color: pickedColor, emoji: pickedEmoji })
-                });
+                await api('/api/events', 'POST', { date: modalDateKey, title, time, color: pickedColor, emoji: pickedEmoji });
                 document.getElementById('eventTitle').value = '';
                 document.getElementById('eventTime').value = '';
                 await renderCalendar();
                 renderModalEvents();
             } catch (err) {
-                console.error('Ошибка добавления события:', err);
+                fail(err, 'Не удалось добавить событие');
             }
         }
 
-        async function deleteEvent(id) {
-            if (!confirm('Удалить событие?')) return;
-            try {
-                await fetch(`/api/events/${id}`, { method: 'DELETE' });
+        function deleteEvent(id) {
+            deferDelete('event', id, `/api/events/${id}`, 'Событие удалено', async () => {
                 await renderCalendar();
-                renderModalEvents();
-            } catch (err) {
-                console.error('Ошибка удаления события:', err);
-            }
+                if (modalDateKey) renderModalEvents();
+            });
         }
 
         // Защита от XSS
