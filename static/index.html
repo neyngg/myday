@@ -730,11 +730,11 @@ body{position:relative}
 
     <!-- Цели -->
     <div id="tab-goals" class="tab-content">
-        <div class="glass-panel">
-            <div id="goalList" class="goal-list">
-                <div class="empty-hint">Загрузка целей...</div>
-            </div>
-        </div>
+        <div class="seg" id="lgSeg" style="margin-top:0"></div>
+        <div class="filters"><div class="chips" id="lgCats"></div></div>
+        <div id="lgList" class="goal-list"><div class="empty-hint">Загрузка целей...</div></div>
+        <div class="section-head"><h2>Накопления</h2><button class="link-btn" onclick="openNewGoal()">Добавить</button></div>
+        <div class="act-card" id="savBlock"><div class="empty-hint" style="padding:6px 0">Загрузка…</div></div>
     </div>
 
     <!-- Календарь -->
@@ -879,6 +879,69 @@ body{position:relative}
         </div>
     </div>
 
+    <!-- Жизненная цель: карточка -->
+    <div class="modal-overlay" id="lgModal" onclick="if(event.target === this) closeLifeGoal()">
+        <div class="modal" id="lgDetail"></div>
+    </div>
+
+    <!-- Жизненная цель: создание / редактирование -->
+    <div class="modal-overlay" id="lgFormModal" onclick="if(event.target === this) closeLgForm()">
+        <div class="modal">
+            <div class="modal-head">
+                <span class="modal-title" id="lgfHead">Новая цель</span>
+                <button class="btn-delete" onclick="closeLgForm()" title="Закрыть" aria-label="Закрыть">✕</button>
+            </div>
+            <input type="text" id="lgfTitle" class="glass-input" placeholder="Название цели" enterkeyhint="done" onkeydown="if(event.key === 'Enter' && !event.isComposing){ event.preventDefault(); submitLifeGoal(); }">
+            <div class="modal-label">Категория</div>
+            <select id="lgfCat" class="glass-input"></select>
+            <div class="modal-label">Срок</div>
+            <input type="date" id="lgfDeadline" class="glass-input" style="width:100%;flex:none">
+            <details id="lgfMore">
+                <summary>Дополнительно</summary>
+                <div class="modal-label">Желаемый результат</div>
+                <textarea id="lgfResult" class="glass-input" placeholder="Что изменится, когда цель будет достигнута?"></textarea>
+                <div id="lgfStatusWrap">
+                    <div class="modal-label">Статус</div>
+                    <div class="seg" id="lgfStatus" style="margin:0"></div>
+                </div>
+                <div id="lgfStagesWrap">
+                    <div class="modal-label">Этапы (по одному в строке)</div>
+                    <textarea id="lgfStages" class="glass-input"></textarea>
+                </div>
+            </details>
+            <button class="glass-btn modal-save" id="lgfSave" onclick="submitLifeGoal()">Создать цель</button>
+        </div>
+    </div>
+
+    <!-- Этап: создание / редактирование -->
+    <div class="modal-overlay" id="msFormModal" onclick="if(event.target === this) closeMsForm()">
+        <div class="modal">
+            <div class="modal-head">
+                <span class="modal-title" id="msfHead">Новый этап</span>
+                <button class="btn-delete" onclick="closeMsForm()" title="Закрыть" aria-label="Закрыть">✕</button>
+            </div>
+            <input type="text" id="msfTitle" class="glass-input" placeholder="Название этапа" enterkeyhint="done" onkeydown="if(event.key === 'Enter' && !event.isComposing){ event.preventDefault(); submitMs(); }">
+            <div class="modal-label">Срок этапа</div>
+            <input type="date" id="msfDeadline" class="glass-input" style="width:100%;flex:none">
+            <div class="modal-label">Статус</div>
+            <div class="seg" id="msfStatus" style="margin:0"></div>
+            <button class="glass-btn modal-save" id="msfSave" onclick="submitMs()">Добавить этап</button>
+            <button class="ghost-btn modal-save" id="msfDelete" style="color:var(--danger);margin-top:10px" onclick="deleteMs()">Удалить этап</button>
+        </div>
+    </div>
+
+    <!-- Привязка задач и привычек к цели -->
+    <div class="modal-overlay" id="lkModal" onclick="if(event.target === this) closeLink()">
+        <div class="modal">
+            <div class="modal-head">
+                <span class="modal-title" id="lkTitle">Привязать задачу</span>
+                <button class="btn-delete" onclick="closeLink()" title="Закрыть" aria-label="Закрыть">✕</button>
+            </div>
+            <div id="lkBody"></div>
+            <button class="glass-btn modal-save" onclick="closeLink()">Готово</button>
+        </div>
+    </div>
+
     <div class="modal-overlay" id="createMenu" onclick="if(event.target === this) closeMenu()">
         <div class="modal">
             <div class="modal-head"><span class="modal-title">Создать</span><button class="btn-delete" onclick="closeMenu()" title="Закрыть" aria-label="Закрыть">✕</button></div>
@@ -886,6 +949,7 @@ body{position:relative}
             <button class="menu-item" onclick="pick('event')"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="4"/><path d="M3 10h18M8 2v4M16 2v4"/></svg>Событие</button>
             <button class="menu-item" onclick="pick('habit')"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg>Привычку</button>
             <button class="menu-item" onclick="pick('goal')"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/></svg>Цель</button>
+            <button class="menu-item" onclick="pick('saving')"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/></svg>Накопление</button>
         </div>
     </div>
 
@@ -966,13 +1030,13 @@ body{position:relative}
         // Центральная кнопка «+» зависит от открытой вкладки
         function onPlus() {
             // Главная (и отчёт) — меню из 4 категорий; на остальных вкладках — сразу создание своего элемента
-            const direct = { tasks: openNewTask, habits: openNewHabit, goals: openNewGoal, focus: () => openModal(todayStr()) }[currentTab];
+            const direct = { tasks: openNewTask, habits: openNewHabit, goals: () => openLifeGoalForm(null), focus: () => openModal(todayStr()) }[currentTab];
             if (direct) direct(); else document.getElementById('createMenu').classList.add('open');
         }
         function closeMenu() { document.getElementById('createMenu').classList.remove('open'); }
         function pick(kind) {
             closeMenu();
-            ({ task: openNewTask, event: () => openModal(todayStr()), habit: openNewHabit, goal: openNewGoal })[kind]();
+            ({ task: openNewTask, event: () => openModal(todayStr()), habit: openNewHabit, goal: () => openLifeGoalForm(null), saving: openNewGoal })[kind]();
         }
 
         // --- ГЛАВНАЯ ---
@@ -995,13 +1059,15 @@ body{position:relative}
 
         async function renderHome() {
             const today = todayStr();
-            let tasks = [], evs = [], gl = [];
+            let tasks = [], evs = [], gl = [], lgl = [];
             try {
-                const [t, e, g] = await Promise.all([
+                const [t, e, g, l] = await Promise.all([
                     api(`/api/tasks?today=${today}`),
                     api(`/api/events?month=${today.slice(0, 7)}`),
-                    api('/api/goals')
+                    api('/api/goals'),
+                    api(`/api/life-goals?status=active&today=${today}`)
                 ]);
+                lgl = vis('lgoal', l.goals);
                 tasks = vis('task', t.tasks); evs = vis('event', e.events.filter(x => x.date === today)); gl = vis('goal', g.goals);
             } catch (err) {
                 fail(err, 'Не удалось загрузить главную');
@@ -1032,10 +1098,11 @@ body{position:relative}
                 const sorted = [...tasks].sort((a, b) => a.completed - b.completed);
                 sorted.slice(0, 5).forEach(t => box.appendChild(taskRow(t)));
             }
-            goals = gl;
-            document.getElementById('homeGoals').innerHTML = gl.length
-                ? goalCards(gl.slice(0, 3))
-                : '<div class="empty-card">Целей пока нет.<br><button class="glass-btn" onclick="openNewGoal()">Создать цель</button></div>';
+            goals = gl; homeLife = lgl;
+            document.getElementById('homeGoals').innerHTML = (lgl.length
+                ? lgl.slice(0, 3).map(lgCard).join('')
+                : '<div class="empty-card">Целей пока нет.<br><button class="glass-btn" onclick="openLifeGoalForm()">Создать цель</button></div>')
+                + (gl.length ? '<div class="nt-sec">Накопления</div>' + goalCards(gl.slice(0, 2)) : '');
             renderActivity();
         }
 
@@ -1339,7 +1406,7 @@ body{position:relative}
             const one = t.repeat === 'none';
             const rows = [['Приоритет', PRIO[t.level]], t.created && ['Создана', shortDate(t.created)],
                 [one ? 'План' : 'Начало', shortDate(t.planned)], t.due && [one ? 'Срок' : 'Конец', shortDate(t.due)], t.time && ['Время', t.time],
-                t.remind === -1 && ['Напоминание', REMIND[t.remind]], ['Повтор', REPEAT_NAMES[t.repeat]], t.category && ['Категория', t.category]].filter(Boolean);
+                t.remind === -1 && ['Напоминание', REMIND[t.remind]], ['Повтор', REPEAT_NAMES[t.repeat]], t.category && ['Категория', t.category], (t.goals || []).length > 0 && ['Цель', t.goals.map(g => g.title).join(', ')]].filter(Boolean);
             const status = t.completed ? '<span class="chip ok">Выполнена</span>'
                 : (t.overdue || t.past_due) ? `${t.overdue ? '<span class="chip bad">Просрочена</span> ' : ''}${t.past_due ? '<span class="chip bad">Срок истёк</span>' : ''}`
                 : '<span class="chip">В работе</span>';
@@ -1691,21 +1758,30 @@ body{position:relative}
             }).join('');
         }
 
-        async function loadGoals() {
+        async function loadGoals(silent) {
+            if (!silent) $('lgList').innerHTML = '<div class="empty-hint">Загрузка…</div>';
             try {
-                goals = vis('goal', (await api('/api/goals')).goals);
+                const [l, s] = await Promise.all([api(`/api/life-goals?status=all&today=${todayStr()}`), api('/api/goals')]);
+                lifeGoals = vis('lgoal', l.goals);
+                goals = vis('goal', s.goals);
+                renderLife();
                 renderGoals();
             } catch (err) {
                 fail(err, 'Не удалось загрузить цели');
-                document.getElementById('goalList').innerHTML = '<div class="empty-hint">Не удалось загрузить цели</div>';
+                if (!silent) $('lgList').innerHTML = '<div class="empty-card">Не удалось загрузить цели.<br><button class="glass-btn" onclick="loadGoals()">Повторить</button></div>';
             }
         }
 
+        // Накопления — прежние цели с числовым прогрессом (/api/goals), отдельный блок под жизненными целями
         function renderGoals() {
-            const list = document.getElementById('goalList');
-            list.innerHTML = goals.length
-                ? goalCards(goals)
-                : '<div class="empty-hint">Целей пока нет. Нажмите «+», чтобы добавить первую</div>';
+            const box = $('savBlock');
+            if (!goals.length) {
+                box.innerHTML = '<div class="empty-hint" style="padding:6px 0">Накоплений пока нет. Добавьте цель с суммой или числом поинтов, например телефон за 70 000 ₽.</div>';
+                return;
+            }
+            const reached = goals.filter(g => g.current >= g.target).length;
+            const avg = Math.round(goals.reduce((a, g) => a + goalPct(g), 0) / goals.length);
+            box.innerHTML = `<div class="act-stats"><div><b>${goals.length}</b><span>накоплений</span></div><div><b>${reached}</b><span>достигнуто</span></div><div><b>${avg}%</b><span>в среднем</span></div></div><div class="goal-list" id="goalList">${goalCards(goals)}</div>`;
         }
 
         function openNewGoal() {
@@ -1784,6 +1860,388 @@ body{position:relative}
             const id = activeGoalId;
             closeGoalModal();
             deferDelete('goal', id, `/api/goals/${id}`, 'Цель удалена', refreshGoalViews);
+        }
+
+        // --- ЖИЗНЕННЫЕ ЦЕЛИ ---
+        // Список и карточки собираются из /api/life-goals; прогресс считает сервер, интерфейс только показывает
+        const GOAL_CATS = { work: 'Работа', study: 'Учёба', growth: 'Развитие', health: 'Здоровье', finance: 'Финансы', personal: 'Личное', other: 'Другое' };
+        const GOAL_TABS = { active: 'Активные', paused: 'Отложенные', done: 'Выполненные' };
+        const GOAL_STATES = { active: 'Активная', paused: 'Отложена', done: 'Выполнена' };
+        const MS_STATES = { todo: 'Не начат', active: 'В работе', done: 'Выполнен' };
+        const DAY_FORMS = ['день', 'дня', 'дней'];
+        const CHEVRON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+
+        let lifeGoals = [], homeLife = [];
+        let lgStatus = 'active', lgCat = '';
+        let lgId = null, lgDetail = null, lgEditing = null, lgFormStatus = 'active', lgSaving = false, lgBusy = false;
+        let msEditing = null, msFormStatus = 'todo';
+        let lkMode = 'task', lkItems = [], lkMsPreset = '';
+        const lgOpen = new Set();
+
+        const tq = () => `today=${todayStr()}`;
+        const lgGet = () => api(`/api/life-goals/${lgId}?${tq()}`);
+
+        function longDate(k) {
+            const [y, m, d] = k.split('-').map(Number);
+            return new Date(y, m - 1, d).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
+        }
+
+        function lgDeadlineText(g) {
+            if (!g.deadline) return 'Без срока';
+            let s = 'до ' + shortDate(g.deadline);
+            if (g.status === 'active' && g.days_left !== null && g.days_left !== undefined) {
+                const n = g.days_left;
+                if (n < 0) s += ` · просрочено на ${-n} ${plural(-n, DAY_FORMS)}`;
+                else if (n === 0) s += ' · сегодня';
+                else s += ` · осталось ${n} ${plural(n, DAY_FORMS)}`;
+            }
+            return s;
+        }
+
+        function lgChips(g) {
+            const st = g.status === 'done' ? '<span class="chip ok">Выполнена</span>'
+                : g.status === 'paused' ? '<span class="chip warn">Отложена</span>'
+                : g.overdue ? '<span class="chip bad">Просрочена</span>'
+                : g.ready_to_complete ? '<span class="chip ok">Всё выполнено</span>'
+                : '<span class="chip ok">В работе</span>';
+            return `<span class="chip">${escapeHtml(g.category_label)}</span>${st}`;
+        }
+
+        function lgCounts(g) {
+            const p = [];
+            if (g.milestones_total) p.push(`этапы ${g.milestones_done}/${g.milestones_total}`);
+            if (g.tasks_total) p.push(`задачи ${g.tasks_done}/${g.tasks_total}`);
+            if (g.habits_total) p.push(`привычки ${g.habits_total}`);
+            return p.join(' · ') || 'Добавьте этапы, задачи или привычки';
+        }
+
+        function lgCard(g) {
+            const done = g.status === 'done';
+            const nm = g.status === 'active' && g.next_milestone;
+            return `
+                <div class="goal-item ${done ? 'done' : ''}" onclick="openLifeGoal(${g.id})">
+                    <div class="goal-top">
+                        <span class="goal-title">${escapeHtml(g.title)}</span>
+                        <span class="goal-pct">${done ? '🎉 ' : ''}${g.progress}%</span>
+                    </div>
+                    <div>${lgChips(g)}</div>
+                    <div class="goal-values">${lgDeadlineText(g)}</div>
+                    <div class="progress" style="margin-top:10px"><div style="width:${g.progress}%"></div></div>
+                    <div class="goal-values">${lgCounts(g)}</div>
+                    ${nm ? `<div class="goal-values">Ближайший этап: ${escapeHtml(nm.title)}${nm.deadline ? ' · до ' + shortDate(nm.deadline) : ''}</div>` : ''}
+                </div>`;
+        }
+
+        // --- раздел «Цели» ---
+        function setLgStatus(k) { lgStatus = k; renderLife(); }
+        function setLgCat(k) { lgCat = k; renderLife(); }
+
+        function renderLife() {
+            const counts = { active: 0, paused: 0, done: 0 };
+            lifeGoals.forEach(g => counts[g.status] = (counts[g.status] || 0) + 1);
+            $('lgSeg').innerHTML = Object.entries(GOAL_TABS).map(([k, v]) =>
+                `<button class="${k === lgStatus ? 'on' : ''}" onclick="setLgStatus('${k}')">${v}${counts[k] ? ' · ' + counts[k] : ''}</button>`).join('');
+
+            const used = Object.keys(GOAL_CATS).filter(k => lifeGoals.some(g => g.category === k));
+            if (lgCat && !used.includes(lgCat)) lgCat = '';
+            const bar = $('lgCats');
+            bar.parentNode.style.display = used.length > 1 ? '' : 'none';
+            bar.innerHTML = [['', 'Все'], ...used.map(k => [k, GOAL_CATS[k]])].map(([k, v]) =>
+                `<button class="cb ${k === lgCat ? 'on' : ''}" onclick="setLgCat('${k}')">${v}</button>`).join('');
+
+            const list = lifeGoals.filter(g => g.status === lgStatus && (!lgCat || g.category === lgCat));
+            const box = $('lgList');
+            if (list.length) { box.innerHTML = list.map(lgCard).join(''); return; }
+            if (!lifeGoals.length) {
+                box.innerHTML = '<div class="empty-card">Жизненных целей пока нет.<br>Опишите, чего хотите добиться, — этапы и задачи можно добавить позже.<br><button class="glass-btn" onclick="openLifeGoalForm()">Создать цель</button></div>';
+            } else if (lgCat && lifeGoals.some(g => g.status === lgStatus)) {
+                box.innerHTML = '<div class="empty-card">Нет целей в этой категории.<br><button class="ghost-btn" style="min-height:44px;margin-top:12px" onclick="setLgCat(\'\')">Сбросить фильтр</button></div>';
+            } else {
+                box.innerHTML = `<div class="empty-card">${lgStatus === 'active' ? 'Активных целей нет.' : lgStatus === 'paused' ? 'Отложенных целей нет.' : 'Выполненных целей пока нет.'}${lgStatus === 'active' ? '<br><button class="glass-btn" onclick="openLifeGoalForm()">Создать цель</button>' : ''}</div>`;
+            }
+        }
+
+        function refreshGoalLists() {
+            if (currentTab === 'goals') loadGoals(true);
+            else if (currentTab === 'home') renderHome();
+        }
+
+        // --- карточка цели ---
+        async function openLifeGoal(id) {
+            lgId = id; lgDetail = null;
+            $('lgDetail').innerHTML = '<div class="empty-hint">Загрузка…</div>';
+            $('lgModal').classList.add('open');
+            try { const r = await lgGet(); if (lgId !== id) return; lgDetail = r.goal; renderLgDetail(); }
+            catch (e) { fail(e, 'Не удалось загрузить цель'); closeLifeGoal(); }
+        }
+
+        function closeLifeGoal() {
+            lgId = null; lgDetail = null;
+            $('lgModal').classList.remove('open');
+        }
+
+        // Единая обёртка для действий внутри карточки: ответ сервера (goal) сразу перерисовывает карточку и списки
+        async function lgCall(fn, err, ok) {
+            if (lgBusy || !lgId) return null;
+            const id = lgId;
+            lgBusy = true;
+            try {
+                const r = await fn();
+                if (r && r.goal && lgId === id) { lgDetail = r.goal; renderLgDetail(); }
+                refreshGoalLists();
+                if (ok) toast(ok);
+                return r || {};
+            } catch (e) { fail(e, err); return null; }
+            finally { lgBusy = false; }
+        }
+
+        function lgTaskRow(t) {
+            const meta = [];
+            if (t.time) meta.push(t.time);
+            if (t.due) meta.push('до ' + shortDate(t.due)); else if (t.repeat === 'none' && t.planned) meta.push('на ' + shortDate(t.planned));
+            if (t.overdue) meta.push('просрочено');
+            if (!t.counts) meta.push('повтор · не входит в прогресс');
+            return `<div class="sub"><div class="chk-hit" onclick="lgToggleTask(${t.id})" role="checkbox" aria-checked="${t.completed}" aria-label="Выполнено"><div class="checkbox ${t.completed ? 'checked' : ''}"></div></div><span class="${t.completed ? 'sdone' : ''}">${escapeHtml(t.text)}${meta.length ? `<br><small class="task-meta ${t.overdue ? 'overdue' : ''}">${escapeHtml(meta.join(' · '))}</small>` : ''}</span><button class="btn-delete" onclick="lgUnlinkTask(${t.id})" title="Отвязать от цели" aria-label="Отвязать задачу">✕</button></div>`;
+        }
+
+        function lgHabitRow(h) {
+            return `<div class="sub"><div class="chk-hit" onclick="lgToggleHabit(${h.id})" role="checkbox" aria-checked="${h.done_today}" aria-label="Выполнено сегодня"><div class="checkbox ${h.done_today ? 'checked' : ''}"></div></div><span>${escapeHtml(h.text)}<br><small class="task-meta">${habitMeta(h)}</small></span><button class="btn-delete" onclick="lgUnlinkHabit(${h.id})" title="Отвязать от цели" aria-label="Отвязать привычку">✕</button></div>`;
+        }
+
+        function lgMsRow(m) {
+            const open = lgOpen.has(m.id), done = m.status === 'done';
+            const parts = [];
+            if (m.deadline) parts.push((m.overdue ? 'просрочен · ' : '') + 'до ' + shortDate(m.deadline));
+            parts.push(MS_STATES[m.status] || m.status);
+            if (m.tasks_total) parts.push(`задачи ${m.tasks_done}/${m.tasks_total}`);
+            const tasks = m.tasks || [];
+            return `
+                <div class="task-item has-subs ${done ? 'completed' : ''} ${m.overdue ? 'overdue' : ''}">
+                    <div class="task-left">
+                        <div class="chk-hit" onclick="event.stopPropagation(); toggleMs(${m.id})" role="checkbox" aria-checked="${done}" aria-label="Этап выполнен"><div class="checkbox ${done ? 'checked' : ''}"></div></div>
+                        <div class="task-body" onclick="openMsForm(${m.id})">
+                            <span class="task-text">${escapeHtml(m.title)}</span>
+                            <span class="task-meta ${m.overdue ? 'overdue' : ''}">${escapeHtml(parts.join(' · '))}</span>
+                            <div class="progress mini"><div style="width:${m.progress}%"></div></div>
+                        </div>
+                    </div>
+                    <button class="sub-toggle ${open ? 'open' : ''}" onclick="toggleMsOpen(${m.id})" aria-expanded="${open}" aria-label="Задачи этапа: ${tasks.length}"><span class="sub-count">${tasks.length}</span>${CHEVRON}</button>
+                    ${open ? `<div class="sub-panel">${tasks.map(lgTaskRow).join('')}${tasks.length ? '' : '<div class="task-meta" style="padding:8px 0">К этапу пока не привязаны задачи</div>'}<button class="link-btn" onclick="openLink('task', ${m.id})">Привязать задачу</button></div>` : ''}
+                </div>`;
+        }
+
+        function renderLgDetail() {
+            const g = lgDetail;
+            if (!g) return;
+            const ms = g.milestones || [], loose = g.tasks || [], habits = g.habits || [];
+            const rows = [['Категория', g.category_label], ['Срок', g.deadline ? longDate(g.deadline) + (g.status === 'active' && g.days_left !== null && g.days_left !== undefined ? (g.days_left < 0 ? ` (просрочено на ${-g.days_left} ${plural(-g.days_left, DAY_FORMS)})` : g.days_left === 0 ? ' (сегодня)' : ` (осталось ${g.days_left} ${plural(g.days_left, DAY_FORMS)})`) : '') : 'Без срока'],
+                g.created && ['Создана', shortDate(g.created)], g.completed_on && ['Завершена', shortDate(g.completed_on)]].filter(Boolean);
+            const act = g.status === 'active'
+                ? `<button class="ghost-btn" onclick="lgStatusSet('done')">Завершить</button><button class="ghost-btn" onclick="lgStatusSet('paused')">Отложить</button>`
+                : g.status === 'paused'
+                    ? `<button class="glass-btn" onclick="lgStatusSet('active')">Вернуть в работу</button><button class="ghost-btn" onclick="lgStatusSet('done')">Завершить</button>`
+                    : `<button class="glass-btn" onclick="lgStatusSet('active')">Вернуть в работу</button>`;
+            $('lgDetail').innerHTML = `
+                <div class="modal-head"><span class="modal-title" style="text-transform:none;word-break:break-word">${escapeHtml(g.title)}</span><button class="btn-delete" onclick="closeLifeGoal()" aria-label="Закрыть">✕</button></div>
+                <div>${lgChips(g)}</div>
+                <dl class="kv">${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${escapeHtml(v)}</dd></div>`).join('')}</dl>
+                ${g.result ? `<div class="modal-label">Результат</div><p class="note">${escapeHtml(g.result)}</p>` : ''}
+                <div class="modal-label">Общий прогресс · ${g.progress}%</div>
+                <div class="progress"><div style="width:${g.progress}%"></div></div>
+                ${g.ready_to_complete ? '<div class="warn-bar" style="margin-top:12px"><span>Всё выполнено — можно завершить цель</span><button class="link-btn" onclick="lgStatusSet(\'done\')">Завершить</button></div>' : ''}
+                <div class="modal-label">Этапы${ms.length ? ` · ${g.milestones_done} из ${ms.length}` : ''}</div>
+                ${ms.length ? `<div class="task-list">${ms.map(lgMsRow).join('')}</div>` : '<div class="empty-card">Этапов пока нет.<br><button class="glass-btn" onclick="openMsForm(null)">Добавить этап</button></div>'}
+                ${loose.length ? `<div class="modal-label">Задачи вне этапов</div><div class="subs">${loose.map(lgTaskRow).join('')}</div>` : ''}
+                <div class="modal-label">Привычки${habits.length ? ` · ${habits.length}` : ''}</div>
+                ${habits.length ? `<div class="subs">${habits.map(lgHabitRow).join('')}</div>` : '<div class="task-meta">К цели не привязаны привычки</div>'}
+                <div class="goal-actions"><button class="glass-btn" onclick="editLifeGoal()">Изменить</button><button class="ghost-btn" onclick="openMsForm(null)">Добавить этап</button></div>
+                <div class="goal-actions"><button class="ghost-btn" onclick="openLink('task', null)">Привязать задачу</button><button class="ghost-btn" onclick="openLink('habit')">Привязать привычку</button></div>
+                <div class="goal-actions">${act}</div>
+                <button class="ghost-btn modal-save" style="color:var(--danger)" onclick="deleteLifeGoal()">Удалить цель</button>`;
+        }
+
+        function toggleMsOpen(id) {
+            if (lgOpen.has(id)) lgOpen.delete(id); else lgOpen.add(id);
+            renderLgDetail();
+        }
+
+        function lgStatusSet(st) {
+            const msg = { done: 'Цель выполнена 🎉', paused: 'Цель отложена', active: 'Цель снова в работе' }[st];
+            return lgCall(() => api(`/api/life-goals/${lgId}?${tq()}`, 'PUT', { status: st }), 'Не удалось изменить статус', msg);
+        }
+
+        function deleteLifeGoal() {
+            if (!lgId) return;
+            const id = lgId;
+            closeLifeGoal();
+            deferDelete('lgoal', id, `/api/life-goals/${id}`, 'Цель удалена', refreshGoalLists);
+        }
+
+        const lgToggleTask = id => lgCall(async () => { await api(`/api/tasks/${id}/toggle?${tq()}`, 'POST'); return lgGet(); }, 'Не удалось обновить задачу');
+        const lgToggleHabit = id => lgCall(async () => { await api(`/api/habits/${id}/toggle?${tq()}`, 'POST'); return lgGet(); }, 'Не удалось отметить привычку');
+        const lgUnlinkTask = id => lgCall(() => api(`/api/life-goals/${lgId}/tasks/${id}?${tq()}`, 'DELETE'), 'Не удалось отвязать задачу', 'Задача отвязана');
+        const lgUnlinkHabit = id => lgCall(() => api(`/api/life-goals/${lgId}/habits/${id}?${tq()}`, 'DELETE'), 'Не удалось отвязать привычку', 'Привычка отвязана');
+
+        // --- форма цели ---
+        function buildLgStatus() {
+            $('lgfStatus').innerHTML = Object.entries(GOAL_STATES).map(([k, v]) =>
+                `<button type="button" class="${k === lgFormStatus ? 'on' : ''}" onclick="lgFormStatus='${k}'; buildLgStatus()">${v}</button>`).join('');
+        }
+
+        function openLifeGoalForm(g) {
+            g = g || null;
+            lgEditing = g ? g.id : null;
+            lgFormStatus = g ? g.status : 'active';
+            buildLgStatus();
+            $('lgfHead').textContent = g ? 'Изменить цель' : 'Новая цель';
+            $('lgfSave').textContent = g ? 'Сохранить' : 'Создать цель';
+            $('lgfTitle').value = g ? g.title : '';
+            $('lgfCat').innerHTML = Object.entries(GOAL_CATS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+            $('lgfCat').value = g ? g.category : 'personal';
+            $('lgfDeadline').value = g && g.deadline || '';
+            $('lgfResult').value = g ? g.result : '';
+            $('lgfStages').value = '';
+            $('lgfStatusWrap').style.display = g ? '' : 'none';
+            $('lgfStagesWrap').style.display = g ? 'none' : '';
+            $('lgfMore').open = !!(g && g.result);
+            $('lgFormModal').classList.add('open');
+            $('lgfTitle').focus();
+        }
+
+        function editLifeGoal() { if (lgDetail) openLifeGoalForm(lgDetail); }
+        function closeLgForm() { $('lgFormModal').classList.remove('open'); }
+
+        async function submitLifeGoal() {
+            if (lgSaving) return;
+            const title = $('lgfTitle').value.trim();
+            if (!title) { toast('Введите название цели'); return; }
+            const body = { title, category: $('lgfCat').value, deadline: $('lgfDeadline').value || null, result: $('lgfResult').value.trim() };
+            const id = lgEditing;
+            if (id) body.status = lgFormStatus;
+            else body.milestones = $('lgfStages').value.split('\n').map(x => x.trim()).filter(Boolean).map(t => ({ title: t }));
+            lgSaving = true;
+            try {
+                if (id) {
+                    const r = await api(`/api/life-goals/${id}?${tq()}`, 'PUT', body);
+                    if (lgId === id) { lgDetail = r.goal; renderLgDetail(); }
+                    closeLgForm(); refreshGoalLists(); toast('Изменения сохранены');
+                } else {
+                    const r = await api(`/api/life-goals?${tq()}`, 'POST', body);
+                    closeLgForm(); refreshGoalLists(); toast('Цель создана');
+                    openLifeGoal(r.id);
+                }
+            } catch (e) { fail(e, 'Не удалось сохранить цель'); }
+            finally { lgSaving = false; }
+        }
+
+        // --- форма этапа ---
+        function buildMsStatus() {
+            $('msfStatus').innerHTML = Object.entries(MS_STATES).map(([k, v]) =>
+                `<button type="button" class="${k === msFormStatus ? 'on' : ''}" onclick="msFormStatus='${k}'; buildMsStatus()">${v}</button>`).join('');
+        }
+
+        function openMsForm(id) {
+            if (!lgDetail) return;
+            const m = id ? (lgDetail.milestones || []).find(x => x.id === id) : null;
+            msEditing = m ? m.id : null;
+            msFormStatus = m ? m.status : 'todo';
+            buildMsStatus();
+            $('msfHead').textContent = m ? 'Изменить этап' : 'Новый этап';
+            $('msfSave').textContent = m ? 'Сохранить' : 'Добавить этап';
+            $('msfDelete').style.display = m ? '' : 'none';
+            $('msfTitle').value = m ? m.title : '';
+            $('msfDeadline').value = m && m.deadline || '';
+            $('msFormModal').classList.add('open');
+            $('msfTitle').focus();
+        }
+
+        function closeMsForm() { $('msFormModal').classList.remove('open'); }
+
+        async function submitMs() {
+            const title = $('msfTitle').value.trim();
+            if (!title) { toast('Введите название этапа'); return; }
+            const body = { title, deadline: $('msfDeadline').value || null, status: msFormStatus };
+            const id = msEditing;
+            const r = await lgCall(() => id
+                ? api(`/api/life-goals/${lgId}/milestones/${id}?${tq()}`, 'PUT', body)
+                : api(`/api/life-goals/${lgId}/milestones?${tq()}`, 'POST', body),
+                'Не удалось сохранить этап', id ? 'Изменения сохранены' : 'Этап добавлен');
+            if (r) closeMsForm();
+        }
+
+        function toggleMs(id) {
+            const m = (lgDetail.milestones || []).find(x => x.id === id);
+            if (!m) return;
+            return lgCall(() => api(`/api/life-goals/${lgId}/milestones/${id}?${tq()}`, 'PUT', { status: m.status === 'done' ? 'todo' : 'done' }), 'Не удалось обновить этап');
+        }
+
+        async function deleteMs() {
+            const id = msEditing;
+            if (!id || !confirm('Удалить этап? Его задачи останутся в цели, но вне этапов.')) return;
+            const r = await lgCall(() => api(`/api/life-goals/${lgId}/milestones/${id}?${tq()}`, 'DELETE'), 'Не удалось удалить этап', 'Этап удалён');
+            if (r) closeMsForm();
+        }
+
+        // --- привязка существующих задач и привычек ---
+        async function openLink(mode, msId) {
+            if (!lgDetail) return;
+            lkMode = mode; lkMsPreset = msId ? String(msId) : ''; lkItems = [];
+            $('lkTitle').textContent = mode === 'task' ? 'Привязать задачу' : 'Привязать привычку';
+            $('lkBody').innerHTML = '<div class="empty-hint">Загрузка…</div>';
+            $('lkModal').classList.add('open');
+            const id = lgId;
+            try {
+                const items = mode === 'task'
+                    ? (await api(`/api/tasks?${tq()}&scope=all`)).tasks.filter(t => !t.completed && t.repeat === 'none')
+                    : (await api(`/api/habits?${tq()}`)).habits;
+                lkItems = items.filter(x => !(x.goals || []).some(g => g.id === id));
+                renderLink();
+            } catch (e) { fail(e, 'Не удалось загрузить список'); closeLink(); }
+        }
+
+        function closeLink() { $('lkModal').classList.remove('open'); }
+
+        function renderLink() {
+            const isTask = lkMode === 'task';
+            const sel = $('lkMs');
+            const cur = sel ? sel.value : lkMsPreset;
+            const ms = (lgDetail.milestones || []).filter(m => m.status !== 'done' || String(m.id) === cur);
+            const list = lkItems.length
+                ? lkItems.map(x => `<button class="menu-item" onclick="lkPick(${x.id})">${escapeHtml(x.text)}</button>`).join('')
+                : (isTask
+                    ? '<div class="empty-hint">Подходящих задач нет — создайте новую выше.</div>'
+                    : '<div class="empty-hint">Свободных привычек нет — создайте новую выше.</div>');
+            $('lkBody').innerHTML = `
+                ${isTask ? `<div class="modal-label">Этап</div>
+                <select id="lkMs" class="glass-input"><option value="">Без этапа</option>${ms.map(m => `<option value="${m.id}" ${String(m.id) === cur ? 'selected' : ''}>${escapeHtml(m.title)}</option>`).join('')}</select>` : ''}
+                <div class="modal-label">${isTask ? 'Новая задача' : 'Новая привычка'}</div>
+                <div class="modal-row"><input id="lkNew" class="glass-input" placeholder="${isTask ? 'Название задачи' : 'Название привычки'}" onkeydown="if(event.key === 'Enter') lkCreate()"><button class="glass-btn" style="padding:0 16px" onclick="lkCreate()">Создать</button></div>
+                <div class="modal-label">${isTask ? 'Существующие задачи' : 'Существующие привычки'}</div>
+                ${list}
+                ${isTask ? '<div class="task-meta" style="margin-top:10px">Повторяющиеся задачи в прогресс не входят — для них привяжите привычку.</div>' : ''}`;
+        }
+
+        function lkMs() { const s = $('lkMs'); return s && s.value ? +s.value : null; }
+
+        async function lkPick(id) {
+            const ms = lkMs();
+            const r = await lgCall(() => lkMode === 'task'
+                ? api(`/api/life-goals/${lgId}/tasks/link?${tq()}`, 'POST', { task_id: id, milestone_id: ms })
+                : api(`/api/life-goals/${lgId}/habits?${tq()}`, 'POST', { habit_id: id }),
+                'Не удалось привязать', lkMode === 'task' ? 'Задача привязана' : 'Привычка привязана');
+            if (r) { lkItems = lkItems.filter(x => x.id !== id); renderLink(); }
+        }
+
+        async function lkCreate() {
+            const input = $('lkNew'), text = input.value.trim();
+            if (!text) { toast('Введите название'); return; }
+            const ms = lkMs();
+            const r = await lgCall(async () => {
+                if (lkMode === 'task') return api(`/api/life-goals/${lgId}/tasks?${tq()}`, 'POST', { text, repeat: 'none', level: 2, today: todayStr(), milestone_id: ms });
+                const h = await api('/api/habits', 'POST', { text });
+                return api(`/api/life-goals/${lgId}/habits?${tq()}`, 'POST', { habit_id: h.id });
+            }, 'Не удалось создать', lkMode === 'task' ? 'Задача создана и привязана' : 'Привычка создана и привязана');
+            if (r) { const i = $('lkNew'); if (i) i.value = ''; }
         }
 
         // --- КАЛЕНДАРЬ ---

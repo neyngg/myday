@@ -50,14 +50,15 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # Токен берётся из переменной окружения BOT_TOKEN
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8241348815:AAH3AVgUQqpZCrPpXrJbaO5ddakAwNtheLQ")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://myday-1mw4.onrender.com")
 # Часовой пояс пользователя: «сегодня» для бота и напоминаний считается в нём, а не по часам сервера (на хостинге это UTC)
 TZ_NAME = os.getenv("TZ_NAME", "Asia/Yekaterinburg")
 if not BOT_TOKEN:
-    raise SystemExit("Задайте переменную окружения BOT_TOKEN")
-REPORTS_DIR = Path("reports")
-DB_NAME = "daily.db"
+    raise SystemExit("Задайте переменную окружения BOT_TOKEN (токен из @BotFather)")
+# База и отчёты: по умолчанию рядом с main.py, путь можно задать переменными DB_PATH и REPORTS_PATH
+REPORTS_DIR = Path(os.getenv("REPORTS_PATH", "reports"))
+DB_NAME = os.getenv("DB_PATH", "daily.db")
 
 try:
     LOCAL_TZ = ZoneInfo(TZ_NAME)
@@ -389,6 +390,7 @@ async def init_db():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_completions_day ON completions (day)")
         await db.commit()
         await migrate_notifications(db)
+        await claim_legacy_data(db)
 
 
 # =====================================================================
@@ -491,6 +493,11 @@ async def list_tasks(db, today: str, scope: str, uid: int) -> list[dict]:
     by_task: dict[int, list] = {}
     for s in subs:
         by_task.setdefault(s["task_id"], []).append({"id": s["id"], "text": s["text"], "done": bool(s["done"])})
+    async with db.execute("SELECT gt.task_id AS task_id, g.id AS id, g.title AS title FROM goal_tasks gt "
+                          "JOIN life_goals g ON g.id = gt.goal_id WHERE g.user_id = ? ORDER BY g.id", (uid,)) as cur:
+        goal_links = await cur.fetchall()
+    goals_of: dict[int, list] = {}
+    for l in goal_links: goals_of.setdefault(l["task_id"], []).append({"id": l["id"], "title": l["title"]})
     tasks = []
     for r in rows:
         if scope == "week": show = visible_today(r, today) or any(occurs(r, d) for d in week)
@@ -505,6 +512,7 @@ async def list_tasks(db, today: str, scope: str, uid: int) -> list[dict]:
             "overdue": is_overdue(r, today),
             "past_due": is_past_due(r, today),
             "subs": by_task.get(r["id"], []),
+            "goals": goals_of.get(r["id"], []),  # жизненные цели, к которым привязана задача
         })
     # Порядок для дневного планировщика: невыполненные вперёд; по дню плана (просроченные раньше сегодняшних);
     # внутри дня — сначала задачи со временем по возрастанию, затем без времени по важности
@@ -673,7 +681,12 @@ async def list_habits(db, today: str, uid: int) -> list[dict]:
                           (uid,)) as cur: logs = await cur.fetchall()
     by: dict[int, set] = {}
     for l in logs: by.setdefault(l["habit_id"], set()).add(l["day"])
-    return [habit_view(r, by.get(r["id"], set()), today) for r in rows]
+    async with db.execute("SELECT gh.habit_id AS habit_id, g.id AS id, g.title AS title FROM goal_habits gh "
+                          "JOIN life_goals g ON g.id = gh.goal_id WHERE g.user_id = ? ORDER BY g.id", (uid,)) as cur:
+        links = await cur.fetchall()
+    goals_of: dict[int, list] = {}
+    for l in links: goals_of.setdefault(l["habit_id"], []).append({"id": l["id"], "title": l["title"]})
+    return [{**habit_view(r, by.get(r["id"], set()), today), "goals": goals_of.get(r["id"], [])} for r in rows]
 
 
 async def toggle_habit_db(db, habit_id: int, day: str, today: str, uid: int) -> dict:
@@ -737,6 +750,375 @@ async def apply_goal_progress(db, goal_id: int, mode: str, value, uid: int) -> d
         await db.execute("UPDATE goals SET current = MAX(current + ?, 0) WHERE id = ?", (v, goal_id))
     await db.commit()
     return dict(await fetch_goal(db, goal_id, uid))
+
+
+# =====================================================================
+#  ЖИЗНЕННЫЕ ЦЕЛИ: операции
+#  «Накопления» — это прежние цели с числовым прогрессом (таблица goals), они работают как раньше.
+#  Жизненная цель — отдельная сущность: результат, срок, статус, этапы, связи с задачами и привычками.
+#  Прогресс жизненной цели не хранится, а считается при каждом чтении, поэтому всегда соответствует
+#  текущему состоянию этапов и задач.
+# =====================================================================
+GOAL_CATEGORIES = {"work": "Работа", "study": "Учёба", "growth": "Развитие", "health": "Здоровье",
+                   "finance": "Финансы", "personal": "Личное", "other": "Другое"}
+GOAL_STATUSES = {"active": "Активная", "done": "Выполнена", "paused": "Отложена"}
+MILESTONE_STATUSES = {"todo": "Не начат", "active": "В работе", "done": "Выполнен"}
+MAX_MILESTONES = 50  # этапов в одной цели
+MAX_LIFE_GOALS = 200  # жизненных целей у одного пользователя
+
+
+def clean_goal_text(value, field: str, limit: int, required: bool = False) -> str:
+    text = (value or "").strip()
+    if required and not text: raise DomainError(400, f"{field}: не может быть пустым")
+    if len(text) > limit: raise DomainError(400, f"{field}: слишком длинное (максимум {limit} символов)")
+    return text
+
+
+def clean_choice(value, allowed: dict, field: str) -> str:
+    if value not in allowed: raise DomainError(400, f"{field}: допустимо только {', '.join(allowed)}")
+    return value
+
+
+def clean_goal_day(value, field: str = "Срок") -> str | None:
+    """Пустое значение — срока нет."""
+    if value is None or (isinstance(value, str) and not value.strip()): return None
+    d = parse_day(value, field)
+    if not 2000 <= d.year <= 2100: raise DomainError(400, f"{field}: год должен быть от 2000 до 2100")
+    return d.isoformat()
+
+
+def clean_milestone(title, deadline, status) -> dict:
+    return dict(title=clean_goal_text(title, "Название этапа", 200, True), deadline=clean_goal_day(deadline, "Срок этапа"),
+                status=clean_choice(status, MILESTONE_STATUSES, "Статус этапа"))
+
+
+def provided(body) -> dict:
+    """Только поля, которые клиент явно прислал (в том числе null — «очистить»)."""
+    return body.model_dump(exclude_unset=True) if hasattr(body, "model_dump") else body.dict(exclude_unset=True)
+
+
+def pct(frac: float) -> int:
+    """Доля -> проценты с округлением «половина вверх» (как в JavaScript, чтобы цифры в интерфейсе и на сервере совпадали)."""
+    return int(frac * 100 + 0.5)
+
+
+def stage_fraction(status: str, tasks_total: int, tasks_done: int) -> float:
+    """Доля готовности этапа. Выполненный этап — 1; иначе доля выполненных связанных задач.
+    Задачи сами этап не завершают: когда все задачи сделаны, этап остаётся «в работе», пока пользователь его не закроет."""
+    if status == "done": return 1.0
+    return tasks_done / tasks_total if tasks_total else 0.0
+
+
+def calc_goal_progress(stages: list[float], loose_total: int, loose_done: int) -> int:
+    """Прогресс цели, %: среднее по этапам. Задачи, не отнесённые ни к одному этапу, считаются ещё одним этапом.
+    100 только когда готово всё; иначе не больше 99."""
+    parts = list(stages)
+    if loose_total: parts.append(loose_done / loose_total)
+    if not parts: return 0
+    if all(p >= 1 for p in parts): return 100
+    return min(99, pct(sum(parts) / len(parts)))
+
+
+def _marks(ids: list) -> str:
+    return ",".join("?" * len(ids))
+
+
+def _goal_task_item(r, today: str) -> dict:
+    return {"id": r["id"], "text": r["text"], "completed": is_done(r, today), "repeat": r["repeat_type"],
+            "planned": planned_of(r), "due": r["due_date"], "time": r["due_time"], "level": r["level"],
+            "overdue": is_overdue(r, today), "past_due": is_past_due(r, today),
+            "milestone_id": r["milestone_id"],
+            "counts": r["repeat_type"] == "none"}  # повторяющиеся задачи в прогресс не входят
+
+
+async def fetch_life_goal(db, goal_id: int, uid: int):
+    """Цель пользователя uid. Чужая и несуществующая — одинаково «не найдена»."""
+    db.row_factory = aiosqlite.Row
+    async with db.execute("SELECT * FROM life_goals WHERE id = ? AND user_id = ?", (goal_id, uid)) as cur:
+        r = await cur.fetchone()
+    if not r: raise DomainError(404, "Цель не найдена")
+    return r
+
+
+async def fetch_milestone(db, goal_id: int, milestone_id: int):
+    db.row_factory = aiosqlite.Row
+    async with db.execute("SELECT * FROM goal_milestones WHERE id = ? AND goal_id = ?", (milestone_id, goal_id)) as cur:
+        r = await cur.fetchone()
+    if not r: raise DomainError(404, "Этап не найден")
+    return r
+
+
+async def build_life_goals(db, uid: int, today: str, rows: list, detail: bool = False) -> list[dict]:
+    """Собирает цели вместе с этапами, задачами и привычками тремя запросами на весь список."""
+    if not rows: return []
+    ids = [r["id"] for r in rows]
+    db.row_factory = aiosqlite.Row
+    async with db.execute(f"SELECT * FROM goal_milestones WHERE goal_id IN ({_marks(ids)}) ORDER BY position, id", ids) as cur:
+        ms_rows = await cur.fetchall()
+    async with db.execute(
+            f"SELECT t.*, gt.goal_id AS goal_id, gt.milestone_id AS milestone_id FROM goal_tasks gt "
+            f"JOIN tasks t ON t.id = gt.task_id WHERE gt.goal_id IN ({_marks(ids)}) AND t.user_id = ? ORDER BY t.id",
+            ids + [uid]) as cur:
+        t_rows = await cur.fetchall()
+    async with db.execute(
+            f"SELECT gh.goal_id AS goal_id, gh.habit_id AS habit_id FROM goal_habits gh "
+            f"JOIN habits h ON h.id = gh.habit_id WHERE gh.goal_id IN ({_marks(ids)}) AND h.user_id = ? ORDER BY gh.habit_id",
+            ids + [uid]) as cur:
+        h_rows = await cur.fetchall()
+    habit_by_id = {h["id"]: h for h in await list_habits(db, today, uid)} if detail and h_rows else {}
+
+    ms_by_goal: dict[int, list] = {}
+    for m in ms_rows: ms_by_goal.setdefault(m["goal_id"], []).append(m)
+    tasks_by_goal: dict[int, list] = {}
+    for r in t_rows: tasks_by_goal.setdefault(r["goal_id"], []).append(r)
+    habits_by_goal: dict[int, list] = {}
+    for h in h_rows: habits_by_goal.setdefault(h["goal_id"], []).append(h["habit_id"])
+
+    def counted(rs):  # (всего, выполнено) среди задач, учитываемых в прогрессе
+        c = [r for r in rs if r["repeat_type"] == "none"]
+        return len(c), sum(1 for r in c if is_done(r, today))
+
+    t0 = date.fromisoformat(today)
+    out = []
+    for g in rows:
+        gid = g["id"]
+        ms_list = ms_by_goal.get(gid, [])
+        known = {m["id"] for m in ms_list}
+        by_ms: dict = {}
+        for r in tasks_by_goal.get(gid, []):
+            by_ms.setdefault(r["milestone_id"] if r["milestone_id"] in known else None, []).append(r)
+        stages, ms_out = [], []
+        for m in ms_list:
+            tt, td = counted(by_ms.get(m["id"], []))
+            frac = stage_fraction(m["status"], tt, td)
+            stages.append(frac)
+            item = {"id": m["id"], "title": m["title"], "deadline": m["deadline"], "status": m["status"],
+                    "status_label": MILESTONE_STATUSES[m["status"]], "done_on": m["done_on"], "position": m["position"],
+                    "overdue": m["status"] != "done" and bool(m["deadline"]) and m["deadline"] < today,
+                    "progress": 100 if m["status"] == "done" else pct(frac),
+                    "tasks_total": tt, "tasks_done": td}
+            if detail: item["tasks"] = [_goal_task_item(r, today) for r in by_ms.get(m["id"], [])]
+            ms_out.append(item)
+        loose = by_ms.get(None, [])
+        lt, ld = counted(loose)
+        all_total, all_done = counted(tasks_by_goal.get(gid, []))
+        progress = 100 if g["status"] == "done" else calc_goal_progress(stages, lt, ld)
+        pending = [m for m in ms_out if m["status"] != "done"]
+        nxt = min(pending, key=lambda m: (m["deadline"] is None, m["deadline"] or "", m["position"])) if pending else None
+        active = g["status"] == "active"
+        item = {
+            "id": gid, "title": g["title"], "result": g["result"],
+            "category": g["category"], "category_label": GOAL_CATEGORIES.get(g["category"], GOAL_CATEGORIES["other"]),
+            "deadline": g["deadline"], "status": g["status"], "status_label": GOAL_STATUSES[g["status"]],
+            "created": g["created_on"], "completed_on": g["completed_on"],
+            "progress": progress,
+            "ready_to_complete": active and progress == 100,  # всё сделано, но закрыть цель должен пользователь
+            "days_left": (date.fromisoformat(g["deadline"]) - t0).days if g["deadline"] else None,
+            "overdue": active and bool(g["deadline"]) and g["deadline"] < today,
+            "milestones_total": len(ms_out), "milestones_done": sum(1 for m in ms_out if m["status"] == "done"),
+            "tasks_total": all_total, "tasks_done": all_done, "tasks_linked": len(tasks_by_goal.get(gid, [])),
+            "habits_total": len(habits_by_goal.get(gid, [])),
+            "next_milestone": {"id": nxt["id"], "title": nxt["title"], "deadline": nxt["deadline"]} if nxt else None,
+        }
+        if detail:
+            item["milestones"] = ms_out
+            item["tasks"] = [_goal_task_item(r, today) for r in loose]  # задачи вне этапов
+            item["habits"] = [habit_by_id[h] for h in habits_by_goal.get(gid, []) if h in habit_by_id]
+        out.append(item)
+    return out
+
+
+async def list_life_goals(db, uid: int, today: str, status: str | None = None) -> list[dict]:
+    sql, args = "SELECT * FROM life_goals WHERE user_id = ?", [uid]
+    if status and status != "all":
+        clean_choice(status, GOAL_STATUSES, "Статус")
+        sql += " AND status = ?"
+        args.append(status)
+    db.row_factory = aiosqlite.Row
+    async with db.execute(sql, args) as cur: rows = await cur.fetchall()
+    rank = {"active": 0, "paused": 1, "done": 2}
+    # активные первыми, внутри — по ближайшему сроку; цели без срока — в конце группы
+    rows = sorted(rows, key=lambda r: (rank[r["status"]], r["deadline"] is None, r["deadline"] or "", -r["id"]))
+    return await build_life_goals(db, uid, today, rows)
+
+
+async def get_life_goal(db, goal_id: int, uid: int, today: str) -> dict:
+    row = await fetch_life_goal(db, goal_id, uid)
+    return (await build_life_goals(db, uid, today, [row], detail=True))[0]
+
+
+async def create_life_goal(db, body, uid: int, today: str) -> int:
+    title = clean_goal_text(body.title, "Название", 200, True)
+    result = clean_goal_text(body.result, "Результат", 1000)
+    category = clean_choice(body.category, GOAL_CATEGORIES, "Категория")
+    deadline = clean_goal_day(body.deadline)
+    status = clean_choice(body.status, GOAL_STATUSES, "Статус")
+    if len(body.milestones) > MAX_MILESTONES: raise DomainError(400, f"В цели не больше {MAX_MILESTONES} этапов")
+    stages = [clean_milestone(m.title, m.deadline, m.status) for m in body.milestones]
+    async with db.execute("SELECT COUNT(*) FROM life_goals WHERE user_id = ?", (uid,)) as cur:
+        if (await cur.fetchone())[0] >= MAX_LIFE_GOALS: raise DomainError(400, f"Не больше {MAX_LIFE_GOALS} жизненных целей")
+    cur = await db.execute(
+        "INSERT INTO life_goals (user_id, title, result, category, deadline, status, created_on, completed_on) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (uid, title, result, category, deadline, status, today, today if status == "done" else None))
+    gid = cur.lastrowid
+    for pos, m in enumerate(stages, 1):
+        await db.execute("INSERT INTO goal_milestones (goal_id, title, deadline, status, position, done_on) VALUES (?, ?, ?, ?, ?, ?)",
+                         (gid, m["title"], m["deadline"], m["status"], pos, today if m["status"] == "done" else None))
+    await db.commit()
+    return gid
+
+
+async def update_life_goal(db, goal_id: int, fields: dict, uid: int, today: str):
+    g = await fetch_life_goal(db, goal_id, uid)
+    sets: dict = {}
+    if "title" in fields: sets["title"] = clean_goal_text(fields["title"], "Название", 200, True)
+    if "result" in fields: sets["result"] = clean_goal_text(fields["result"], "Результат", 1000)
+    if "category" in fields: sets["category"] = clean_choice(fields["category"], GOAL_CATEGORIES, "Категория")
+    if "deadline" in fields: sets["deadline"] = clean_goal_day(fields["deadline"])
+    if "status" in fields:
+        st = clean_choice(fields["status"], GOAL_STATUSES, "Статус")
+        sets["status"] = st
+        if st != g["status"]: sets["completed_on"] = today if st == "done" else None
+    if sets:
+        cols = list(sets)  # имена колонок задаются только кодом выше, не клиентом
+        await db.execute(f"UPDATE life_goals SET {', '.join(c + ' = ?' for c in cols)} WHERE id = ?",
+                         [sets[c] for c in cols] + [goal_id])
+        await db.commit()
+
+
+async def delete_life_goal(db, goal_id: int, uid: int):
+    """Удаляет цель, её этапы и связи. Сами задачи и привычки остаются — это отдельные сущности."""
+    await fetch_life_goal(db, goal_id, uid)
+    for table in ("goal_milestones", "goal_tasks", "goal_habits"):
+        await db.execute(f"DELETE FROM {table} WHERE goal_id = ?", (goal_id,))
+    await db.execute("DELETE FROM life_goals WHERE id = ?", (goal_id,))
+    await db.commit()
+
+
+async def add_milestone(db, goal_id: int, title, deadline, status: str, uid: int, today: str) -> int:
+    await fetch_life_goal(db, goal_id, uid)
+    m = clean_milestone(title, deadline, status)
+    async with db.execute("SELECT COUNT(*), COALESCE(MAX(position), 0) FROM goal_milestones WHERE goal_id = ?", (goal_id,)) as cur:
+        count, last = await cur.fetchone()
+    if count >= MAX_MILESTONES: raise DomainError(400, f"В цели не больше {MAX_MILESTONES} этапов")
+    cur = await db.execute("INSERT INTO goal_milestones (goal_id, title, deadline, status, position, done_on) VALUES (?, ?, ?, ?, ?, ?)",
+                           (goal_id, m["title"], m["deadline"], m["status"], last + 1, today if m["status"] == "done" else None))
+    await db.commit()
+    return cur.lastrowid
+
+
+async def update_milestone(db, goal_id: int, milestone_id: int, fields: dict, uid: int, today: str):
+    await fetch_life_goal(db, goal_id, uid)
+    old = await fetch_milestone(db, goal_id, milestone_id)
+    sets: dict = {}
+    if "title" in fields: sets["title"] = clean_goal_text(fields["title"], "Название этапа", 200, True)
+    if "deadline" in fields: sets["deadline"] = clean_goal_day(fields["deadline"], "Срок этапа")
+    if "status" in fields:
+        st = clean_choice(fields["status"], MILESTONE_STATUSES, "Статус этапа")
+        sets["status"] = st
+        if st != old["status"]: sets["done_on"] = today if st == "done" else None
+    if sets:
+        cols = list(sets)
+        await db.execute(f"UPDATE goal_milestones SET {', '.join(c + ' = ?' for c in cols)} WHERE id = ?",
+                         [sets[c] for c in cols] + [milestone_id])
+        await db.commit()
+
+
+async def delete_milestone(db, goal_id: int, milestone_id: int, uid: int):
+    """Задачи удалённого этапа остаются привязанными к цели — просто вне этапов."""
+    await fetch_life_goal(db, goal_id, uid)
+    await fetch_milestone(db, goal_id, milestone_id)
+    await db.execute("UPDATE goal_tasks SET milestone_id = NULL WHERE goal_id = ? AND milestone_id = ?", (goal_id, milestone_id))
+    await db.execute("DELETE FROM goal_milestones WHERE id = ?", (milestone_id,))
+    await db.commit()
+
+
+async def link_task_to_goal(db, goal_id: int, task_id: int, milestone_id: int | None, uid: int):
+    """Привязывает существующую задачу к цели (и, при желании, к этапу). Повторный вызов переносит задачу на другой этап."""
+    await fetch_life_goal(db, goal_id, uid)
+    await fetch_task(db, task_id, uid)
+    if milestone_id is not None: await fetch_milestone(db, goal_id, milestone_id)
+    await db.execute("INSERT INTO goal_tasks (goal_id, task_id, milestone_id) VALUES (?, ?, ?) "
+                     "ON CONFLICT (goal_id, task_id) DO UPDATE SET milestone_id = excluded.milestone_id",
+                     (goal_id, task_id, milestone_id))
+    await db.commit()
+
+
+async def unlink_task_from_goal(db, goal_id: int, task_id: int, uid: int):
+    await fetch_life_goal(db, goal_id, uid)
+    cur = await db.execute("DELETE FROM goal_tasks WHERE goal_id = ? AND task_id = ?", (goal_id, task_id))
+    if cur.rowcount == 0: raise DomainError(404, "Задача не привязана к этой цели")
+    await db.commit()
+
+
+async def create_goal_task(db, goal_id: int, task, uid: int, today: str) -> int:
+    """Создаёт обычную задачу myday (той же функцией, что и в разделе задач) и сразу привязывает её к цели."""
+    await fetch_life_goal(db, goal_id, uid)
+    if task.milestone_id is not None: await fetch_milestone(db, goal_id, task.milestone_id)
+    task.today = task.today or today
+    task_id = await create_task(db, task, uid)
+    await db.execute("INSERT INTO goal_tasks (goal_id, task_id, milestone_id) VALUES (?, ?, ?)", (goal_id, task_id, task.milestone_id))
+    await db.commit()
+    return task_id
+
+
+async def link_habit_to_goal(db, goal_id: int, habit_id: int, uid: int):
+    """Привычки остаются в своей системе — цель лишь ссылается на них."""
+    await fetch_life_goal(db, goal_id, uid)
+    async with db.execute("SELECT 1 FROM habits WHERE id = ? AND user_id = ?", (habit_id, uid)) as cur:
+        if not await cur.fetchone(): raise DomainError(404, "Привычка не найдена")
+    await db.execute("INSERT OR IGNORE INTO goal_habits (goal_id, habit_id) VALUES (?, ?)", (goal_id, habit_id))
+    await db.commit()
+
+
+async def unlink_habit_from_goal(db, goal_id: int, habit_id: int, uid: int):
+    await fetch_life_goal(db, goal_id, uid)
+    cur = await db.execute("DELETE FROM goal_habits WHERE goal_id = ? AND habit_id = ?", (goal_id, habit_id))
+    if cur.rowcount == 0: raise DomainError(404, "Привычка не привязана к этой цели")
+    await db.commit()
+
+
+def savings_item(r) -> dict:
+    d = dict(r)
+    d["percent"] = min(100, pct(d["current"] / d["target"])) if d["target"] else 0
+    return d
+
+
+async def goals_overview(db, uid: int, today: str) -> dict:
+    """Всё для раздела «Цели» и главной: активные жизненные цели (первыми) и накопления."""
+    life = await list_life_goals(db, uid, today)
+    counts = {s: 0 for s in GOAL_STATUSES}
+    for g in life: counts[g["status"]] += 1
+    db.row_factory = aiosqlite.Row
+    async with db.execute("SELECT id, title, emoji, unit, target, current FROM goals WHERE user_id = ? ORDER BY id DESC", (uid,)) as cur:
+        savings = [savings_item(r) for r in await cur.fetchall()]
+    return {
+        "life_goals": [g for g in life if g["status"] == "active"],
+        "counts": {**counts, "total": len(life)},
+        "savings": {"items": savings, "count": len(savings),
+                    "completed": sum(1 for s in savings if s["current"] >= s["target"]),
+                    "avg_percent": int(sum(s["percent"] for s in savings) / len(savings) + 0.5) if savings else 0},
+        "categories": [{"key": k, "label": v} for k, v in GOAL_CATEGORIES.items()],
+        "statuses": [{"key": k, "label": v} for k, v in GOAL_STATUSES.items()],
+        "milestone_statuses": [{"key": k, "label": v} for k, v in MILESTONE_STATUSES.items()],
+    }
+
+
+async def claim_legacy_data(db):
+    """Привычки, события и накопления, созданные до появления владельцев, не удаляются.
+    Они достаются владельцу из LEGACY_OWNER_ID, а без этой переменной — единственному пользователю, если он один.
+    Если пользователей несколько и переменная не задана, старые записи просто лежат в базе, никому не видимые."""
+    owner = os.getenv("LEGACY_OWNER_ID", "").strip()
+    if owner.isdigit():
+        uid = int(owner)
+    else:
+        async with db.execute("SELECT user_id FROM users") as cur: users = await cur.fetchall()
+        if len(users) != 1: return
+        uid = users[0][0]
+    for table in ("habits", "goals", "events"):
+        await db.execute(f"UPDATE {table} SET user_id = ? WHERE user_id IS NULL", (uid,))
+    await db.commit()
 
 
 # =====================================================================
@@ -1688,7 +2070,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 Path("static").mkdir(exist_ok=True)
-REPORTS_DIR.mkdir(exist_ok=True)
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+Path(DB_NAME).parent.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
@@ -1723,6 +2106,43 @@ class GoalCreate(BaseModel): title: str; target: float; unit: str = ""; emoji: s
 
 
 class GoalProgress(BaseModel): mode: str; value: float
+
+
+class MilestoneIn(BaseModel): title: str; deadline: str | None = None; status: str = "todo"
+
+
+class LifeGoalCreate(BaseModel):
+    title: str
+    result: str = ""
+    category: str = "other"
+    deadline: str | None = None
+    status: str = "active"
+    milestones: list[MilestoneIn] = []
+
+
+class LifeGoalUpdate(BaseModel):  # меняются только присланные поля; deadline: null — убрать срок
+    title: str | None = None
+    result: str | None = None
+    category: str | None = None
+    deadline: str | None = None
+    status: str | None = None
+
+
+class MilestoneUpdate(BaseModel):
+    title: str | None = None
+    deadline: str | None = None
+    status: str | None = None
+
+
+class GoalTaskCreate(TaskCreate):
+    repeat: str = "none"  # задача для цели по умолчанию разовая: повторяющиеся в прогресс не входят
+    milestone_id: int | None = None
+
+
+class GoalTaskLink(BaseModel): task_id: int; milestone_id: int | None = None
+
+
+class GoalHabitLink(BaseModel): habit_id: int
 
 
 # --- задачи (у каждой есть владелец; пользователь определяется по Telegram initData, см. api_user) ---
@@ -1801,6 +2221,7 @@ async def delete_task(task_id: int, request: Request):
     async with aiosqlite.connect(DB_NAME) as db:
         await fetch_task(db, task_id, uid)
         await db.execute("DELETE FROM subtasks WHERE task_id = ?", (task_id,))
+        await db.execute("DELETE FROM goal_tasks WHERE task_id = ?", (task_id,))
         await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))  # история в completions остаётся для отчётов
         await db.commit()
     await task_changed(task_id, uid)
@@ -2064,18 +2485,31 @@ NOTIFY_MIGRATIONS = [
         "DELETE FROM tasks",
         "DELETE FROM notification_log WHERE task_id IS NOT NULL",
     ]),
-    # Привычки, события и цели тоже становятся личными. Старые записи были общими (без владельца) — удаляем их.
+    # Привычки, события и накопления тоже становятся личными. Старые записи без владельца НЕ удаляются:
+    # их получает владелец (см. claim_legacy_data).
     ("notifications_004_personal_data", [
         ("ADD_COLUMN", "habits", "user_id", "INTEGER"),
         ("ADD_COLUMN", "goals", "user_id", "INTEGER"),
         ("ADD_COLUMN", "events", "user_id", "INTEGER"),
-        "DELETE FROM habit_logs",
-        "DELETE FROM habits",
-        "DELETE FROM goals",
-        "DELETE FROM events",
         "CREATE INDEX IF NOT EXISTS idx_habits_user ON habits (user_id)",
         "CREATE INDEX IF NOT EXISTS idx_goals_user ON goals (user_id)",
         "CREATE INDEX IF NOT EXISTS idx_events_user_date ON events (user_id, date)",
+    ]),
+    # Жизненные цели с этапами и связями с задачами и привычками. Таблица goals («накопления») не меняется.
+    ("goals_005_life_goals", [
+        "CREATE TABLE IF NOT EXISTS life_goals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, "
+        "title TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT 'other', deadline TEXT, "
+        "status TEXT NOT NULL DEFAULT 'active', created_on TEXT NOT NULL, completed_on TEXT)",
+        "CREATE TABLE IF NOT EXISTS goal_milestones (id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id INTEGER NOT NULL, "
+        "title TEXT NOT NULL, deadline TEXT, status TEXT NOT NULL DEFAULT 'todo', position INTEGER NOT NULL DEFAULT 0, done_on TEXT)",
+        "CREATE TABLE IF NOT EXISTS goal_tasks (goal_id INTEGER NOT NULL, task_id INTEGER NOT NULL, milestone_id INTEGER, "
+        "PRIMARY KEY (goal_id, task_id))",
+        "CREATE TABLE IF NOT EXISTS goal_habits (goal_id INTEGER NOT NULL, habit_id INTEGER NOT NULL, "
+        "PRIMARY KEY (goal_id, habit_id))",
+        "CREATE INDEX IF NOT EXISTS idx_life_goals_user ON life_goals (user_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_goal_milestones_goal ON goal_milestones (goal_id)",
+        "CREATE INDEX IF NOT EXISTS idx_goal_tasks_task ON goal_tasks (task_id)",
+        "CREATE INDEX IF NOT EXISTS idx_goal_habits_habit ON goal_habits (habit_id)",
     ]),
 ]
 
@@ -2097,6 +2531,13 @@ async def migrate_notifications(db):
             shutil.copy2(src, bak)
     except Exception as e:  # копия — страховка, её отсутствие не повод ронять запуск
         log.warning("Не удалось сделать резервную копию БД перед миграцией: %r", e)
+    if any(m[0].startswith("goals_") for m in pending):
+        try:
+            src_db, bak_goals = Path(DB_NAME), Path(str(DB_NAME) + ".before-goals.bak")
+            if src_db.exists() and src_db.stat().st_size > 0 and not bak_goals.exists():
+                shutil.copy2(src_db, bak_goals)
+        except Exception as e:
+            log.warning("Не удалось сделать резервную копию БД перед миграцией целей: %r", e)
     for mid, statements in pending:
         try:
             await db.execute("BEGIN")
@@ -2999,6 +3440,7 @@ async def delete_habit(habit_id: int, request: Request):
     uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
         cur = await db.execute("DELETE FROM habits WHERE id = ? AND user_id = ?", (habit_id, uid))
+        if cur.rowcount: await db.execute("DELETE FROM goal_habits WHERE habit_id = ?", (habit_id,))
         if cur.rowcount == 0: raise DomainError(404, "Привычка не найдена")
         await db.execute("DELETE FROM habit_logs WHERE habit_id = ?", (habit_id,))
         await db.commit()
@@ -3085,6 +3527,128 @@ async def delete_goal_api(goal_id: int, request: Request):
         if cur.rowcount == 0: raise DomainError(404, "Цель не найдена")
         await db.commit()
     return {"status": "ok"}
+
+
+# --- раздел «Цели»: жизненные цели + накопления (накопления — прежние /api/goals, без изменений) ---
+@app.get("/api/goals/overview")
+async def goals_overview_api(request: Request, today: str | None = None):
+    uid = await api_uid(request)
+    async with aiosqlite.connect(DB_NAME) as db:
+        return await goals_overview(db, uid, client_today(today))
+
+
+@app.get("/api/life-goals")
+async def get_life_goals_api(request: Request, status: str = "all", today: str | None = None):
+    uid = await api_uid(request)
+    async with aiosqlite.connect(DB_NAME) as db:
+        return {"goals": await list_life_goals(db, uid, client_today(today), status)}
+
+
+@app.post("/api/life-goals")
+async def add_life_goal_api(goal: LifeGoalCreate, request: Request, today: str | None = None):
+    uid = await api_uid(request)
+    t = client_today(today)
+    async with aiosqlite.connect(DB_NAME) as db:
+        gid = await create_life_goal(db, goal, uid, t)
+        return {"status": "ok", "id": gid, "goal": await get_life_goal(db, gid, uid, t)}
+
+
+@app.get("/api/life-goals/{goal_id}")
+async def get_life_goal_api(goal_id: int, request: Request, today: str | None = None):
+    uid = await api_uid(request)
+    async with aiosqlite.connect(DB_NAME) as db:
+        return {"goal": await get_life_goal(db, goal_id, uid, client_today(today))}
+
+
+@app.put("/api/life-goals/{goal_id}")
+async def update_life_goal_api(goal_id: int, body: LifeGoalUpdate, request: Request, today: str | None = None):
+    uid = await api_uid(request)
+    t = client_today(today)
+    async with aiosqlite.connect(DB_NAME) as db:
+        await update_life_goal(db, goal_id, provided(body), uid, t)
+        return {"status": "ok", "goal": await get_life_goal(db, goal_id, uid, t)}
+
+
+@app.delete("/api/life-goals/{goal_id}")
+async def delete_life_goal_api(goal_id: int, request: Request):
+    uid = await api_uid(request)
+    async with aiosqlite.connect(DB_NAME) as db:
+        await delete_life_goal(db, goal_id, uid)
+    return {"status": "ok"}
+
+
+@app.post("/api/life-goals/{goal_id}/milestones")
+async def add_milestone_api(goal_id: int, m: MilestoneIn, request: Request, today: str | None = None):
+    uid = await api_uid(request)
+    t = client_today(today)
+    async with aiosqlite.connect(DB_NAME) as db:
+        mid = await add_milestone(db, goal_id, m.title, m.deadline, m.status, uid, t)
+        return {"status": "ok", "id": mid, "goal": await get_life_goal(db, goal_id, uid, t)}
+
+
+@app.put("/api/life-goals/{goal_id}/milestones/{milestone_id}")
+async def update_milestone_api(goal_id: int, milestone_id: int, m: MilestoneUpdate, request: Request, today: str | None = None):
+    uid = await api_uid(request)
+    t = client_today(today)
+    async with aiosqlite.connect(DB_NAME) as db:
+        await update_milestone(db, goal_id, milestone_id, provided(m), uid, t)
+        return {"status": "ok", "goal": await get_life_goal(db, goal_id, uid, t)}
+
+
+@app.delete("/api/life-goals/{goal_id}/milestones/{milestone_id}")
+async def delete_milestone_api(goal_id: int, milestone_id: int, request: Request, today: str | None = None):
+    uid = await api_uid(request)
+    t = client_today(today)
+    async with aiosqlite.connect(DB_NAME) as db:
+        await delete_milestone(db, goal_id, milestone_id, uid)
+        return {"status": "ok", "goal": await get_life_goal(db, goal_id, uid, t)}
+
+
+@app.post("/api/life-goals/{goal_id}/tasks")
+async def add_goal_task_api(goal_id: int, task: GoalTaskCreate, request: Request, today: str | None = None):
+    """Создать новую задачу прямо из цели."""
+    uid = await api_uid(request)
+    t = client_today(today)
+    async with aiosqlite.connect(DB_NAME) as db:
+        tid = await create_goal_task(db, goal_id, task, uid, t)
+        return {"status": "ok", "task_id": tid, "goal": await get_life_goal(db, goal_id, uid, t)}
+
+
+@app.post("/api/life-goals/{goal_id}/tasks/link")
+async def link_goal_task_api(goal_id: int, body: GoalTaskLink, request: Request, today: str | None = None):
+    """Привязать уже существующую задачу (или перенести привязанную на другой этап)."""
+    uid = await api_uid(request)
+    t = client_today(today)
+    async with aiosqlite.connect(DB_NAME) as db:
+        await link_task_to_goal(db, goal_id, body.task_id, body.milestone_id, uid)
+        return {"status": "ok", "goal": await get_life_goal(db, goal_id, uid, t)}
+
+
+@app.delete("/api/life-goals/{goal_id}/tasks/{task_id}")
+async def unlink_goal_task_api(goal_id: int, task_id: int, request: Request, today: str | None = None):
+    uid = await api_uid(request)
+    t = client_today(today)
+    async with aiosqlite.connect(DB_NAME) as db:
+        await unlink_task_from_goal(db, goal_id, task_id, uid)
+        return {"status": "ok", "goal": await get_life_goal(db, goal_id, uid, t)}
+
+
+@app.post("/api/life-goals/{goal_id}/habits")
+async def link_goal_habit_api(goal_id: int, body: GoalHabitLink, request: Request, today: str | None = None):
+    uid = await api_uid(request)
+    t = client_today(today)
+    async with aiosqlite.connect(DB_NAME) as db:
+        await link_habit_to_goal(db, goal_id, body.habit_id, uid)
+        return {"status": "ok", "goal": await get_life_goal(db, goal_id, uid, t)}
+
+
+@app.delete("/api/life-goals/{goal_id}/habits/{habit_id}")
+async def unlink_goal_habit_api(goal_id: int, habit_id: int, request: Request, today: str | None = None):
+    uid = await api_uid(request)
+    t = client_today(today)
+    async with aiosqlite.connect(DB_NAME) as db:
+        await unlink_habit_from_goal(db, goal_id, habit_id, uid)
+        return {"status": "ok", "goal": await get_life_goal(db, goal_id, uid, t)}
 
 
 @app.get("/")
