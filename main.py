@@ -50,7 +50,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # Токен берётся из переменной окружения BOT_TOKEN
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8241348815:AAH3AVgUQqpZCrPpXrJbaO5ddakAwNtheLQ")
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://myday-1mw4.onrender.com")
 # Часовой пояс пользователя: «сегодня» для бота и напоминаний считается в нём, а не по часам сервера (на хостинге это UTC)
 TZ_NAME = os.getenv("TZ_NAME", "Asia/Yekaterinburg")
