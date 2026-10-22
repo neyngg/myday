@@ -51,7 +51,7 @@ from pydantic import BaseModel
 
 # Токен берётся из переменной окружения BOT_TOKEN
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8241348815:AAH3AVgUQqpZCrPpXrJbaO5ddakAwNtheLQ")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://structured-completely-auction-mins.trycloudflare.com ")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://79.137.199.84")
 # Часовой пояс пользователя: «сегодня» для бота и напоминаний считается в нём, а не по часам сервера (на хостинге это UTC)
 TZ_NAME = os.getenv("TZ_NAME", "Asia/Yekaterinburg")
 if not BOT_TOKEN:
