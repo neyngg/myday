@@ -650,6 +650,59 @@ body{position:relative}
 .nt-h:first-child{border-top:0}
 .nt-h .nt-s{font-size:12px;color:var(--ink-2);margin-top:3px;word-break:break-word}
 .chip.warn{background:var(--yellow);color:var(--ink)}
+
+/* ===== myday motion refinement: transitions only, no layout/brand changes ===== */
+:root { --motion-fast: 150ms; --motion-ui: 220ms; --motion-panel: 260ms; --motion-ease: cubic-bezier(.22,.61,.36,1); }
+button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .menu-item,
+.swatch, .bar, .cal-cell, .goal-item, .habit-item, .task-item, .checkbox, .sub-toggle, .wd i, .sw i, .sw i::after {
+    transition-timing-function: var(--motion-ease);
+}
+.task-item, .habit-item, .goal-item, .glass-panel, .tile, .rep-card, .act-card, .next-event, .empty-card {
+    transition: opacity var(--motion-ui) var(--motion-ease), transform var(--motion-ui) var(--motion-ease), background-color var(--motion-ui) var(--motion-ease);
+}
+.checkbox { transition: background-color var(--motion-fast) var(--motion-ease), border-color var(--motion-fast) var(--motion-ease), transform var(--motion-fast) var(--motion-ease); }
+.checkbox.checked { transform: scale(1); }
+.chk-hit:active .checkbox { transform: scale(.9); }
+.glass-btn, .ghost-btn, .round-btn, .tab-btn, .cb, .hc, .menu-item, .swatch { -webkit-tap-highlight-color: transparent; }
+.glass-btn:active, .ghost-btn:active { transition-duration: 90ms; }
+.progress > div { transition: width 520ms var(--motion-ease); will-change: width; }
+.bar i { transition: height 420ms var(--motion-ease), opacity var(--motion-ui) var(--motion-ease); }
+.tab-content.active { animation: mydayContentIn 220ms var(--motion-ease) both; }
+@keyframes mydayContentIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+/* Keep overlays in the render tree while closed so opacity/transform can animate both ways. */
+.modal-overlay {
+    display: flex;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity var(--motion-panel) var(--motion-ease), visibility 0s linear var(--motion-panel);
+}
+.modal-overlay.open {
+    display: flex;
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transition: opacity var(--motion-panel) var(--motion-ease), visibility 0s linear 0s;
+}
+.modal-overlay .modal {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0);
+    animation: none;
+    transition: opacity var(--motion-panel) var(--motion-ease), transform var(--motion-panel) var(--motion-ease);
+    will-change: opacity, transform;
+}
+.modal-overlay.open .modal { opacity: 1; transform: translate3d(0, 0, 0); }
+.modal-overlay:not(.open) .modal { pointer-events: none; }
+.toast { transition: opacity var(--motion-ui) var(--motion-ease); }
+.sub-panel { animation: mydayContentIn 200ms var(--motion-ease) both; }
+.ring-segment { transition: stroke-dashoffset 680ms var(--motion-ease); }
+.ring-num { font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+    .modal-overlay { transition: none !important; }
+    .modal-overlay .modal { transform: none !important; }
+}
+
 </style>
 </head>
 <body>
@@ -1043,7 +1096,7 @@ body{position:relative}
         const RING_COLORS = ['#87976F', '#B7C39B', '#F2BBDD', '#667750'];
         const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>';
 
-        function ringSvg(pct) {
+        function ringSvg(pct, fromPct = 0) {
             const r = 100, C = 2 * Math.PI * r, cap = 30, gap = 14;
             const L = C / 4 - gap - cap;
             const shift = (gap + cap) / 2 / C * 360;
@@ -1051,10 +1104,47 @@ body{position:relative}
             for (let i = 0; i < 4; i++) {
                 const rot = `rotate(${-90 + i * 90 + shift} 130 130)`;
                 const f = Math.max(0, Math.min(1, (pct - i * 25) / 25));
+                const from = Math.max(0, Math.min(1, (fromPct - i * 25) / 25));
                 arcs += `<circle cx="130" cy="130" r="${r}" fill="none" stroke="rgba(48,41,32,0.07)" stroke-width="30" stroke-linecap="round" stroke-dasharray="${L} ${C}" transform="${rot}"/>`;
-                if (f > 0) arcs += `<circle cx="130" cy="130" r="${r}" fill="none" stroke="${RING_COLORS[i]}" stroke-width="30" stroke-linecap="round" stroke-dasharray="${Math.max(f * L, 0.1)} ${C}" transform="${rot}"/>`;
+                arcs += `<circle class="ring-segment" data-ring-target="${(L * (1 - f)).toFixed(3)}" cx="130" cy="130" r="${r}" fill="none" stroke="${RING_COLORS[i]}" stroke-width="30" stroke-linecap="round" stroke-dasharray="${L} ${C}" stroke-dashoffset="${(L * (1 - from)).toFixed(3)}" transform="${rot}"/>`;
             }
-            return `<svg viewBox="0 0 260 260">${arcs}</svg>`;
+            return `<svg viewBox="0 0 260 260" data-ring-pct="${pct}">${arcs}</svg>`;
+        }
+
+        let previousHomeRingPct = 0;
+        let previousHomeRingDone = null;
+        let homeRingAnimationFrame = 0;
+
+        function animateHomeProgress(ring, targetDone, total, targetPct) {
+            if (!ring) return;
+            if (homeRingAnimationFrame) cancelAnimationFrame(homeRingAnimationFrame);
+            const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+            const number = ring.querySelector('.ring-num');
+            const fromDone = Number(ring.dataset.fromDone || 0);
+            const startedAt = performance.now();
+            const duration = reducedMotion ? 0 : 680;
+            const segments = ring.querySelectorAll('.ring-segment');
+            const tick = (now) => {
+                const t = duration ? Math.min(1, (now - startedAt) / duration) : 1;
+                const eased = 1 - Math.pow(1 - t, 3);
+                if (number && total) number.textContent = `${Math.round(fromDone + (targetDone - fromDone) * eased)}/${total}`;
+                if (t < 1) homeRingAnimationFrame = requestAnimationFrame(tick);
+                else homeRingAnimationFrame = 0;
+            };
+            // Start the SVG dash transition only after the initial offsets have painted.
+            segments.forEach(segment => {
+                segment.style.transition = 'none';
+                segment.getBoundingClientRect();
+                segment.style.transition = reducedMotion ? 'none' : 'stroke-dashoffset 680ms cubic-bezier(.22,.61,.36,1)';
+                segment.setAttribute('stroke-dashoffset', segment.dataset.ringTarget || '0');
+            });
+            if (duration) homeRingAnimationFrame = requestAnimationFrame(tick);
+            else {
+                if (number && total) number.textContent = `${targetDone}/${total}`;
+                homeRingAnimationFrame = 0;
+            }
+            ring.dataset.fromDone = String(targetDone);
+            ring.dataset.targetPct = String(targetPct);
         }
 
         async function renderHome() {
@@ -1077,11 +1167,19 @@ body{position:relative}
             const total = tasks.length;
             const done = tasks.filter(t => t.completed).length;
             const pct = total ? done / total * 100 : 0;
-            document.getElementById('ringWrap').innerHTML = ringSvg(pct) + `
+            const ringWrap = document.getElementById('ringWrap');
+            const fromPct = previousHomeRingPct;
+            const fromDone = previousHomeRingDone === null ? 0 : previousHomeRingDone;
+            ringWrap.innerHTML = ringSvg(pct, fromPct) + `
                 <div class="ring-center">
-                    <div class="ring-num">${total ? done + '/' + total : '—'}</div>
+                    <div class="ring-num">${total ? fromDone + '/' + total : '—'}</div>
                     <div class="ring-label">${total ? 'задач выполнено сегодня' : 'на сегодня задач нет'}</div>
                 </div>`;
+            const ringNum = ringWrap.querySelector('.ring-num');
+            if (ringNum) ringWrap.dataset.fromDone = String(fromDone);
+            animateHomeProgress(ringWrap, done, total, pct);
+            previousHomeRingPct = pct;
+            previousHomeRingDone = done;
 
             const now = pad(new Date().getHours()) + ':' + pad(new Date().getMinutes());
             evs.sort((a, b) => (a.time || '99').localeCompare(b.time || '99'));
