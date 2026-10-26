@@ -51,7 +51,7 @@ from pydantic import BaseModel
 
 # Токен берётся из переменной окружения BOT_TOKEN
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8241348815:AAH3AVgUQqpZCrPpXrJbaO5ddakAwNtheLQ")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "ssh root@79.137.199.84https://mydailyday.duckdns.org")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://mydailyday.duckdns.org")
 # Часовой пояс пользователя: «сегодня» для бота и напоминаний считается в нём, а не по часам сервера (на хостинге это UTC)
 TZ_NAME = os.getenv("TZ_NAME", "Asia/Yekaterinburg")
 if not BOT_TOKEN:
