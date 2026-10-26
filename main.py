@@ -51,7 +51,7 @@ from pydantic import BaseModel
 
 # Токен берётся из переменной окружения BOT_TOKEN
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8241348815:AAH3AVgUQqpZCrPpXrJbaO5ddakAwNtheLQ")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://mydailyday.duckdns.org")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "ssh root@79.137.199.84https://mydailyday.duckdns.org")
 # Часовой пояс пользователя: «сегодня» для бота и напоминаний считается в нём, а не по часам сервера (на хостинге это UTC)
 TZ_NAME = os.getenv("TZ_NAME", "Asia/Yekaterinburg")
 if not BOT_TOKEN:
@@ -284,6 +284,8 @@ class Creator(StatesGroup):
     goal_name = State()
     event_name = State()
     habit_name = State()
+    habit_time = State()  # время напоминания
+    habit_freq = State()  # частота: каждый день / дни недели
 
 
 class Editor(StatesGroup):
@@ -300,6 +302,7 @@ class Editor(StatesGroup):
     r_date = State()  # перенос задачи из напоминания на выбранную дату
     n_time = State()  # время утреннего плана / вечернего итога / сводки просроченных
     n_tz = State()  # часовой пояс
+    n_offs = State()  # за сколько минут до задачи напоминать
 
 
 # =====================================================================
@@ -414,13 +417,16 @@ def is_done(r, today: str) -> bool:
 
 
 def is_overdue(r, today: str) -> bool:
-    """Просрочена по плану: разовая, не выполнена, плановый день уже прошёл. Только такие переносит «на сегодня»."""
-    return r["repeat_type"] == "none" and r["done_on"] is None and planned_of(r) < today
+    """Просрочена: разовая, не выполнена, плановый день прошёл И (если задан срок) срок тоже истёк.
+    Задача с периодом «с 27 по 29» в середине периода не просрочена. Только такие переносит «на сегодня»."""
+    if r["repeat_type"] != "none" or r["done_on"] is not None or planned_of(r) >= today: return False
+    return not r["due_date"] or r["due_date"] < today
 
 
 def is_past_due(r, today: str) -> bool:
     """Срок исполнения истёк (не зависит от переносов плана)."""
-    return r["repeat_type"] == "none" and r["done_on"] is None and bool(r["due_date"]) and r["due_date"] < today
+    return (r["repeat_type"] == "none" and r["done_on"] is None and bool(r["due_date"]) and r["due_date"] < today
+            and not is_overdue(r, today))  # если задача уже «просрочена», второй пометкой не дублируем
 
 
 def visible_today(r, today: str) -> bool:
@@ -483,7 +489,7 @@ async def fetch_task(db, task_id: int, uid: int):
 
 
 async def list_tasks(db, today: str, scope: str, uid: int) -> list[dict]:
-    if scope not in ("today", "week", "all"): raise DomainError(400, "Неизвестный период")
+    if scope not in ("today", "week", "all", "done"): raise DomainError(400, "Неизвестный период")
     d0 = date.fromisoformat(today)
     week = [(d0 + timedelta(days=i)).isoformat() for i in range(7)]
     db.row_factory = aiosqlite.Row
@@ -502,6 +508,7 @@ async def list_tasks(db, today: str, scope: str, uid: int) -> list[dict]:
     for r in rows:
         if scope == "week": show = visible_today(r, today) or any(occurs(r, d) for d in week)
         elif scope == "all": show = True
+        elif scope == "done": show = is_done(r, today)  # раздел «Выполненные»
         else: show = visible_today(r, today)
         if not show: continue
         tasks.append({
@@ -509,6 +516,7 @@ async def list_tasks(db, today: str, scope: str, uid: int) -> list[dict]:
             "repeat": r["repeat_type"], "created": r["created_on"], "planned": planned_of(r), "due": r["due_date"],
             "time": r["due_time"], "remind": r["remind_min"], "category": r["category"], "note": r["note"],
             "completed": is_done(r, today),
+            "done_on": r["done_on"] if r["done_on"] and r["done_on"] != "2000-01-01" else None,  # 2000-01-01 — метка старых записей без даты
             "overdue": is_overdue(r, today),
             "past_due": is_past_due(r, today),
             "subs": by_task.get(r["id"], []),
@@ -519,7 +527,8 @@ async def list_tasks(db, today: str, scope: str, uid: int) -> list[dict]:
     def order(t):
         day = t["planned"] if (t["repeat"] == "none" and t["planned"] < today) else today
         return (t["completed"], day, t["time"] is None, t["time"] or "", -t["level"], -t["id"])
-    tasks.sort(key=order)
+    if scope == "done": tasks.sort(key=lambda t: (t["done_on"] or "", t["id"]), reverse=True)  # недавно выполненные — выше
+    else: tasks.sort(key=order)
     return tasks
 
 
@@ -627,7 +636,8 @@ async def carry_over_db(db, today: str, uid: int) -> int:
     """Переносит на сегодня только действительно просроченные невыполненные разовые задачи пользователя."""
     cur = await db.execute(
         "UPDATE tasks SET planned_date = ?, reminded_on = NULL WHERE repeat_type = 'none' AND done_on IS NULL AND user_id = ? "
-        "AND COALESCE(planned_date, created_on, '2000-01-01') < ?", (today, uid, today))
+        "AND COALESCE(planned_date, created_on, '2000-01-01') < ? AND (due_date IS NULL OR due_date < ?)",
+        (today, uid, today, today))
     await db.commit()
     if cur.rowcount: await task_changed(None, uid)
     return cur.rowcount
@@ -663,11 +673,52 @@ def habit_streaks(days: set[str], today: str) -> tuple[int, int]:
     return cur, best
 
 
+HABIT_COLS = "id, text, created_on, remind_time, remind_days, remind_type"
+HABIT_REMIND_TYPES = {"normal": "Обычное"}  # типы напоминаний; сейчас только обычное — сообщение «📚 Время "…"!»
+
+
+def habit_days_list(raw) -> list[int]:
+    """«0,2,4» -> [0, 2, 4] (0 — понедельник). Пустая строка — каждый день."""
+    out = set()
+    for x in str(raw or "").split(","):
+        x = x.strip()
+        if x.isdigit() and 0 <= int(x) <= 6: out.add(int(x))
+    return sorted(out)
+
+
+def habit_remind_view(row) -> dict | None:
+    if not row["remind_time"]: return None
+    days = habit_days_list(row["remind_days"])
+    return {"time": row["remind_time"], "repeat": "days" if days else "daily", "days": days,
+            "type": row["remind_type"] or "normal"}
+
+
+def clean_habit_text(text) -> str:
+    text = (text or "").strip()
+    if not text: raise DomainError(400, "Пустое название")
+    if len(text) > 120: raise DomainError(400, "Название слишком длинное")
+    return text
+
+
+def clean_habit_reminder(time, repeat: str, days, remind_type: str) -> tuple[str | None, str, str]:
+    """(время ЧЧ:ММ или None, дни «0,2,4» или '' = каждый день, тип). Без времени напоминания нет."""
+    if time is None or (isinstance(time, str) and not time.strip()):
+        return None, "", "normal"
+    t = parse_time(time, "Время напоминания")
+    if remind_type not in HABIT_REMIND_TYPES: raise DomainError(400, "Неизвестный тип напоминания")
+    if repeat not in ("daily", "days"): raise DomainError(400, "Частота: каждый день или по дням недели")
+    if repeat == "daily": return t, "", remind_type
+    picked = sorted({int(d) for d in days})
+    if any(not 0 <= d <= 6 for d in picked): raise DomainError(400, "Дни недели: числа от 0 (понедельник) до 6 (воскресенье)")
+    if not picked: raise DomainError(400, "Выберите хотя бы один день недели")
+    return t, ("" if len(picked) == 7 else ",".join(map(str, picked))), remind_type
+
+
 def habit_view(row, days: set[str], today: str) -> dict:
     t = date.fromisoformat(today)
     cur, best = habit_streaks(days, today)
     return {
-        "id": row["id"], "text": row["text"], "created": row["created_on"],
+        "id": row["id"], "text": row["text"], "created": row["created_on"], "remind": habit_remind_view(row),
         "done_today": today in days, "streak": cur, "best": best, "total": len(days),
         "week": [{"date": (t - timedelta(days=i)).isoformat(), "done": (t - timedelta(days=i)).isoformat() in days}
                  for i in range(6, -1, -1)],
@@ -676,7 +727,7 @@ def habit_view(row, days: set[str], today: str) -> dict:
 
 async def list_habits(db, today: str, uid: int) -> list[dict]:
     db.row_factory = aiosqlite.Row
-    async with db.execute("SELECT id, text, created_on FROM habits WHERE user_id = ? ORDER BY id DESC", (uid,)) as cur: rows = await cur.fetchall()
+    async with db.execute(f"SELECT {HABIT_COLS} FROM habits WHERE user_id = ? ORDER BY id DESC", (uid,)) as cur: rows = await cur.fetchall()
     async with db.execute("SELECT habit_id, day FROM habit_logs WHERE habit_id IN (SELECT id FROM habits WHERE user_id = ?)",
                           (uid,)) as cur: logs = await cur.fetchall()
     by: dict[int, set] = {}
@@ -691,7 +742,7 @@ async def list_habits(db, today: str, uid: int) -> list[dict]:
 
 async def toggle_habit_db(db, habit_id: int, day: str, today: str, uid: int) -> dict:
     db.row_factory = aiosqlite.Row
-    async with db.execute("SELECT id, text, created_on FROM habits WHERE id = ? AND user_id = ?", (habit_id, uid)) as cur:
+    async with db.execute(f"SELECT {HABIT_COLS} FROM habits WHERE id = ? AND user_id = ?", (habit_id, uid)) as cur:
         row = await cur.fetchone()
     if not row: raise DomainError(404, "Привычка не найдена")
     d, t = parse_day(day, "День"), date.fromisoformat(today)
@@ -709,14 +760,33 @@ async def toggle_habit_db(db, habit_id: int, day: str, today: str, uid: int) -> 
     return habit_view(row, days, today)
 
 
-async def create_habit(db, text: str, uid: int, today: str | None = None) -> int:
-    text = (text or "").strip()
-    if not text: raise DomainError(400, "Пустое название")
-    if len(text) > 120: raise DomainError(400, "Название слишком длинное")
-    cur = await db.execute("INSERT INTO habits (text, created_on, user_id) VALUES (?, ?, ?)",
-                           (text, today or today_iso(), uid))
+async def create_habit(db, text: str, uid: int, today: str | None = None, time: str | None = None,
+                       repeat: str = "daily", days=(), remind_type: str = "normal") -> int:
+    text = clean_habit_text(text)
+    r_time, r_days, r_type = clean_habit_reminder(time, repeat, list(days), remind_type)
+    # remind_set_at: напоминание не отправляется «задним числом» за время, которое на сегодня уже прошло
+    cur = await db.execute(
+        "INSERT INTO habits (text, created_on, user_id, remind_time, remind_days, remind_type, remind_set_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (text, today or today_iso(), uid, r_time, r_days, r_type, iso(utcnow()) if r_time else None))
     await db.commit()
     return cur.lastrowid
+
+
+async def update_habit(db, habit_id: int, text: str, uid: int, time: str | None = None,
+                       repeat: str = "daily", days=(), remind_type: str = "normal"):
+    text = clean_habit_text(text)
+    r_time, r_days, r_type = clean_habit_reminder(time, repeat, list(days), remind_type)
+    db.row_factory = aiosqlite.Row
+    async with db.execute("SELECT remind_time, remind_days, remind_type, remind_set_at FROM habits WHERE id = ? AND user_id = ?",
+                          (habit_id, uid)) as cur:
+        old = await cur.fetchone()
+    if not old: raise DomainError(404, "Привычка не найдена")
+    same = (old["remind_time"], old["remind_days"] or "", old["remind_type"] or "normal") == (r_time, r_days, r_type)
+    set_at = old["remind_set_at"] if same else (iso(utcnow()) if r_time else None)
+    await db.execute("UPDATE habits SET text = ?, remind_time = ?, remind_days = ?, remind_type = ?, remind_set_at = ? WHERE id = ?",
+                     (text, r_time, r_days, r_type, set_at, habit_id))
+    await db.commit()
+    await habit_changed(uid)  # время/дни изменились — снять устаревшие ожидающие отправки
 
 
 # =====================================================================
@@ -1268,7 +1338,8 @@ async def build_plan(today: str, uid: int):
         lines += ["", "<b>Привычки</b>"]
         for h in shown_habits:
             streak = f" · 🔥 {h['streak']}" if h["streak"] else ""
-            lines.append(f"{'✅' if h['done_today'] else '⬜'} {html.escape(h['text'])}{streak}")
+            bell = f" · 🔔 {h['remind']['time']}" if h.get("remind") else ""
+            lines.append(f"{'✅' if h['done_today'] else '⬜'} {html.escape(h['text'])}{streak}{bell}")
             rows.append([InlineKeyboardButton(text=f"{'✅' if h['done_today'] else '⬜'} {h['text'][:28]}",
                                               callback_data=f"pl_hab:{h['id']}")])
     tail = []
@@ -1402,15 +1473,121 @@ async def btn_habits(message: Message, state: FSMContext):
 async def process_new_habit(message: Message, state: FSMContext):
     text = (message.text or "").strip()
     try:
-        async with aiosqlite.connect(DB_NAME) as db:
-            await create_habit(db, text, message.from_user.id)
+        clean_habit_text(text)
     except DomainError as e:
         await message.answer(f"⚠️ {e.message}. Попробуй ещё раз:")
         return
-    await state.clear()
+    await state.update_data(habit_text=text)
+    await state.set_state(Creator.habit_time)
+    await message.answer("⏰ Во сколько напоминать? Формат ЧЧ:ММ, например 08:30.\nНапиши «нет», если напоминание не нужно.")
 
-    ans = f"🌱 <b>Привычка добавлена</b>\n\n<blockquote><b>Название:</b> {html.escape(text)}</blockquote>\n\nОтмечать её можно в «📋 План»."
-    await message.answer(ans, reply_markup=habit_kb(), parse_mode=ParseMode.HTML)
+
+MENU_TEXTS = {"📋 План", "📝 Задачи", "🎯 Цели", "📅 События", "🌱 Привычки", "📊 Отчет активности", "🔔 Уведомления"}
+WEEKDAYS_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def habit_freq_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Каждый день", callback_data="hf:daily"),
+        InlineKeyboardButton(text="По дням недели", callback_data="hf:days")]])
+
+
+def habit_days_kb(picked: list[int]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=("✅ " if i in picked else "") + WEEKDAYS_SHORT[i], callback_data=f"hd:{i}")
+             for i in range(4)],
+            [InlineKeyboardButton(text=("✅ " if i in picked else "") + WEEKDAYS_SHORT[i], callback_data=f"hd:{i}")
+             for i in range(4, 7)],
+            [InlineKeyboardButton(text="Готово", callback_data="hd:ok")]]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def schedule_text(days: list[int]) -> str:
+    return ", ".join(WEEKDAYS_SHORT[d] for d in days) if days else "каждый день"
+
+
+@dp.message(Creator.habit_time)
+async def process_habit_time(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    if raw in MENU_TEXTS:  # нажали кнопку меню посреди создания — выходим из режима ввода
+        await state.clear()
+        await message.answer("Создание привычки отменено. Нажми кнопку ещё раз.")
+        return
+    data = await state.get_data()
+    if raw.lower() in ("нет", "-", "0"):
+        await finish_habit(message, state, data["habit_text"], message.from_user.id, None, "daily", [])
+        return
+    try:
+        t = parse_time(raw)
+    except DomainError:
+        await message.answer("⚠️ Не понял время. Напиши ЧЧ:ММ, например 08:30, или «нет»:")
+        return
+    await state.update_data(habit_remind=t, habit_days=[])
+    await state.set_state(Creator.habit_freq)
+    await message.answer("🔁 Как часто напоминать?", reply_markup=habit_freq_kb())
+
+
+@dp.callback_query(Creator.habit_freq, F.data == "hf:daily")
+async def cq_habit_daily(cq: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await cq.answer()
+    try:
+        await cq.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+    await finish_habit(cq.message, state, data["habit_text"], cq.from_user.id, data["habit_remind"], "daily", [])
+
+
+@dp.callback_query(Creator.habit_freq, F.data == "hf:days")
+async def cq_habit_days(cq: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await cq.answer()
+    try:
+        await cq.message.edit_text("📆 В какие дни напоминать? Выбери дни и нажми «Готово».",
+                                   reply_markup=habit_days_kb(data.get("habit_days", [])))
+    except TelegramBadRequest:
+        pass
+
+
+@dp.callback_query(Creator.habit_freq, F.data.startswith("hd:"))
+async def cq_habit_day(cq: CallbackQuery, state: FSMContext):
+    arg = cq.data[3:]
+    data = await state.get_data()
+    days = set(data.get("habit_days", []))
+    if arg == "ok":
+        if not days: return await cq.answer("Выбери хотя бы один день", show_alert=True)
+        await cq.answer()
+        try:
+            await cq.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        await finish_habit(cq.message, state, data["habit_text"], cq.from_user.id, data["habit_remind"], "days", sorted(days))
+        return
+    if arg.isdigit() and 0 <= int(arg) <= 6:
+        days ^= {int(arg)}
+    await state.update_data(habit_days=sorted(days))
+    try:
+        await cq.message.edit_reply_markup(reply_markup=habit_days_kb(sorted(days)))
+    except TelegramBadRequest:
+        pass
+    await cq.answer()
+
+
+async def finish_habit(message: Message, state: FSMContext, text: str, uid: int, r_time: str | None, repeat: str, days: list[int]):
+    try:
+        async with aiosqlite.connect(DB_NAME) as db:
+            await create_habit(db, text, uid, time=r_time, repeat=repeat, days=days)
+    except DomainError as e:
+        await state.clear()
+        await message.answer(f"⚠️ {html.escape(e.message)}")
+        return
+    await state.clear()
+    lines = ["🌱 <b>Привычка добавлена</b>\n", "<blockquote>", f"<b>Название:</b> {html.escape(text)}"]
+    if r_time:
+        lines += [f"<b>Время:</b> {r_time}", f"<b>Частота:</b> {schedule_text(days)}", "<b>Напоминание:</b> обычное"]
+    else:
+        lines.append("<b>Напоминание:</b> нет")
+    lines += ["</blockquote>", "\nОтмечать её можно в «📋 План»."]
+    await message.answer("\n".join(lines), reply_markup=habit_kb(), parse_mode=ParseMode.HTML)
 
 
 # 5. ОТЧЕТ АКТИВНОСТИ
@@ -1895,6 +2072,33 @@ async def process_r_date(message: Message, state: FSMContext):
 
 
 # --- настройки уведомлений в боте (те же данные, что и в приложении) ---
+def offset_label(m: int) -> str:
+    if m % 1440 == 0: return f"{m // 1440} д"
+    if m % 60 == 0: return f"{m // 60} ч"
+    return f"{m} мин"
+
+
+def offsets_label(offs: list[int]) -> str:
+    return ", ".join(offset_label(m) for m in offs) if offs else "выключены"
+
+
+def parse_offsets_text(raw: str) -> list[int]:
+    """«60, 30, 10», «2ч, 15», «1д» -> минуты. «нет» — пустой список (напоминания выключены)."""
+    t = (raw or "").strip().lower()
+    if t in ("нет", "-", "0", ""): return []
+    out = []
+    for part in re.split(r"[,;]", t):
+        part = part.strip()
+        if not part: continue
+        m = re.fullmatch(r"(\d+)\s*([а-яё]*)", part)
+        if not m: raise DomainError(400, f"Не понял «{part}». Пример: 60, 30, 10 или 2ч")
+        unit = m[2]
+        mult = 60 if unit.startswith("ч") else 1440 if unit.startswith("д") else 1 if unit in ("", "м", "мин", "минут", "минуты") else None
+        if mult is None: raise DomainError(400, f"Не понял единицу «{unit}». Используйте мин, ч или д")
+        out.append(int(m[1]) * mult)
+    return out
+
+
 def settings_text(u: dict) -> str:
     s = u["s"]
     m = lambda v: "✅" if v else "⬜"
@@ -1902,8 +2106,7 @@ def settings_text(u: dict) -> str:
         "🔔 <b>Уведомления</b>", "",
         f"🌍 Часовой пояс: <b>{html.escape(u['tz'])}</b>{' (определяется автоматически)' if u['tz_auto'] else ''}", "",
         f"{m(s['enabled'])} Все уведомления",
-        f"{m(s['remind_30'])} За 30 минут до задачи",
-        f"{m(s['remind_10'])} За 10 минут до задачи",
+        f"⏰ Напоминать до задачи: {offsets_label(parse_offsets(s['remind_offsets']))}",
         f"{m(s['morning_on'])} Утренний план — {s['morning_time']}",
         f"{m(s['evening_on'])} Вечерний итог — {s['evening_time']}",
         f"{m(s['overdue_on'])} Сводка просроченных — {s['overdue_time']}", "",
@@ -1916,8 +2119,7 @@ def settings_kb(u: dict) -> InlineKeyboardMarkup:
     B = InlineKeyboardButton
     return InlineKeyboardMarkup(inline_keyboard=[
         [B(text=f"{m(s['enabled'])} Все", callback_data="nt:enabled")],
-        [B(text=f"{m(s['remind_30'])} За 30 мин", callback_data="nt:remind_30"),
-         B(text=f"{m(s['remind_10'])} За 10 мин", callback_data="nt:remind_10")],
+        [B(text="⏰ До задачи: " + offsets_label(parse_offsets(s['remind_offsets'])), callback_data="nto")],
         [B(text=f"{m(s['morning_on'])} Утро", callback_data="nt:morning_on"),
          B(text=f"🕔 {s['morning_time']}", callback_data="ntm:morning")],
         [B(text=f"{m(s['evening_on'])} Вечер", callback_data="nt:evening_on"),
@@ -1989,6 +2191,15 @@ async def cq_nt_tz(cq: CallbackQuery, state: FSMContext):
     await cq.answer()
 
 
+@dp.callback_query(F.data == "nto")
+async def cq_nt_offsets(cq: CallbackQuery, state: FSMContext):
+    await state.set_state(Editor.n_offs)
+    msg = await cq.message.answer("<i>За сколько минут до задачи напоминать? Перечислите через запятую, например: 60, 30, 10. "
+                                  "Можно писать «2ч» или «1д». «нет» — не напоминать.</i>", parse_mode=ParseMode.HTML)
+    await state.update_data(msg_id=cq.message.message_id, prompt_id=msg.message_id)
+    await cq.answer()
+
+
 async def _finish_settings_input(message: Message, state: FSMContext, data: dict):
     try:
         await message.delete()
@@ -2010,6 +2221,24 @@ async def process_n_time(message: Message, state: FSMContext):
         return
     except Exception:
         log.exception("Не удалось сохранить время уведомления")
+        await message.answer("⚠️ Не удалось сохранить, попробуйте позже.")
+        await state.clear()
+        return
+    await _finish_settings_input(message, state, data)
+
+
+@dp.message(Editor.n_offs)
+async def process_n_offs(message: Message, state: FSMContext):
+    data = await state.get_data()
+    try:
+        offs = parse_offsets_text(message.text or "")
+        u = await bot_user(message.from_user.id, message.chat.id)
+        await update_notification_settings(u["user_id"], {"remind_offsets": offs})
+    except DomainError as e:
+        await message.answer(f"⚠️ {e.message}. Введите ещё раз (например 60, 30, 10) или нажмите кнопку меню:")
+        return
+    except Exception:
+        log.exception("Не удалось сохранить напоминания до задачи")
         await message.answer("⚠️ Не удалось сохранить, попробуйте позже.")
         await state.clear()
         return
@@ -2096,7 +2325,12 @@ class MoveBody(BaseModel):
 class SubCreate(BaseModel): text: str
 
 
-class HabitCreate(BaseModel): text: str
+class HabitCreate(BaseModel):
+    text: str
+    time: str | None = None  # ЧЧ:ММ; пусто — без напоминания
+    repeat: str = "daily"  # daily — каждый день, days — по выбранным дням недели
+    days: list[int] = []  # для repeat=days: 0 — понедельник … 6 — воскресенье
+    remind_type: str = "normal"
 
 
 class EventCreate(BaseModel): date: str; title: str; time: str | None = None; color: str = "#3a86ff"; emoji: str = "📌"
@@ -2319,8 +2553,28 @@ async def export_stats(request: Request, today: str | None = None, date_from: st
 log = logging.getLogger("myday.notify")
 
 NOTIFY_TICK_SECONDS = 20  # шаг планировщика: напоминание приходит с задержкой не больше этого значения
-REMIND_OFFSETS = (30, 10)  # за сколько минут до начала напоминать
+MAX_REMIND_MINUTES = 24 * 60  # самое раннее напоминание — за сутки до начала
+MAX_REMIND_OFFSETS = 8  # сколько напоминаний можно настроить
+
+
+def parse_offsets(raw) -> list[int]:
+    """«60,30,10» или список -> [60, 30, 10] (по убыванию, без дублей и мусора)."""
+    items = raw.replace(";", ",").split(",") if isinstance(raw, str) else list(raw or [])
+    out = set()
+    for x in items:
+        try:
+            v = int(str(x).strip())
+        except ValueError:
+            continue
+        if 1 <= v <= MAX_REMIND_MINUTES: out.add(v)
+    return sorted(out, reverse=True)
+
+
+def offsets_of(u: dict) -> list[int]:
+    """За сколько минут до начала задачи пользователь хочет получать напоминания."""
+    return parse_offsets(u["s"].get("remind_offsets"))
 DIGEST_GRACE = timedelta(hours=3)  # сколько после назначенного времени ещё можно отправить сводку (после простоя)
+HABIT_GRACE = timedelta(minutes=30)  # напоминание о привычке позже чем через 30 минут после времени уже не нужно
 MAX_SEND_ATTEMPTS = 5
 RETRY_DELAYS = (30, 60, 120, 300)  # секунды до следующей попытки; последняя повторяется
 STUCK_SENDING_AFTER = timedelta(minutes=5)
@@ -2331,19 +2585,19 @@ INIT_DATA_MAX_AGE = 7 * 24 * 3600
 ALLOW_NO_AUTH = os.getenv("ALLOW_NO_AUTH", "0") == "1"
 
 DEFAULT_SETTINGS = {
-    "enabled": 1, "remind_30": 1, "remind_10": 1,
+    "enabled": 1, "remind_offsets": "30,10",
     "morning_on": 1, "morning_time": "05:00",
     "evening_on": 1, "evening_time": "20:00",
     "overdue_on": 1, "overdue_time": "09:00",
 }
-BOOL_KEYS = ("enabled", "remind_30", "remind_10", "morning_on", "evening_on", "overdue_on")
+BOOL_KEYS = ("enabled", "morning_on", "evening_on", "overdue_on")
 TIME_KEYS = ("morning_time", "evening_time", "overdue_time")
 SETTING_KEYS = tuple(DEFAULT_SETTINGS)
 DIGESTS = {"morning": ("morning_on", "morning_time"),
            "evening": ("evening_on", "evening_time"),
            "overdue": ("overdue_on", "overdue_time")}
 KIND_LABELS = {"remind": "Напоминание", "snooze": "Отложенное напоминание", "morning": "Утренний план",
-               "evening": "Вечерний итог", "overdue": "Просроченные", "test": "Тест"}
+               "evening": "Вечерний итог", "overdue": "Просроченные", "habit": "Привычка", "test": "Тест"}
 
 _tick_state: dict = {"loop": None, "lock": None}
 _bg: set = set()
@@ -2511,6 +2765,22 @@ NOTIFY_MIGRATIONS = [
         "CREATE INDEX IF NOT EXISTS idx_goal_tasks_task ON goal_tasks (task_id)",
         "CREATE INDEX IF NOT EXISTS idx_goal_habits_habit ON goal_habits (habit_id)",
     ]),
+    # Напоминания о привычках: время, дни недели, тип. remind_days: '' — каждый день, иначе «0,2,4» (0 — понедельник).
+    ("habits_006_reminders", [
+        ("ADD_COLUMN", "habits", "remind_time", "TEXT"),
+        ("ADD_COLUMN", "habits", "remind_days", "TEXT NOT NULL DEFAULT ''"),
+        ("ADD_COLUMN", "habits", "remind_type", "TEXT NOT NULL DEFAULT 'normal'"),
+        ("ADD_COLUMN", "habits", "remind_set_at", "TEXT"),
+        ("ADD_COLUMN", "notification_log", "habit_id", "INTEGER"),
+        "CREATE INDEX IF NOT EXISTS idx_nlog_habit ON notification_log (habit_id)",
+    ]),
+    # Свои напоминания до задачи: список минут вместо двух фиксированных переключателей (30 и 10).
+    # Прежний выбор пользователя переносится: включённые 30/10 становятся элементами списка.
+    ("notifications_007_remind_offsets", [
+        ("ADD_COLUMN", "notification_settings", "remind_offsets", "TEXT NOT NULL DEFAULT '30,10'"),
+        "UPDATE notification_settings SET remind_offsets = CASE WHEN remind_30 AND remind_10 THEN '30,10' "
+        "WHEN remind_30 THEN '30' WHEN remind_10 THEN '10' ELSE '' END",
+    ]),
 ]
 
 
@@ -2638,6 +2908,7 @@ async def register_user(user_id: int, chat_id: int):
 def settings_view(u: dict) -> dict:
     out = {k: bool(u["s"][k]) for k in BOOL_KEYS}
     out.update({k: u["s"][k] for k in TIME_KEYS})
+    out["remind_offsets"] = parse_offsets(u["s"]["remind_offsets"])
     out.update({"tz": u["tz"], "tz_auto": bool(u["tz_auto"])})
     return out
 
@@ -2651,6 +2922,15 @@ def validate_settings_patch(patch: dict) -> dict:
             clean[k] = int(bool(v))
         elif k in TIME_KEYS:
             clean[k] = parse_time(v, "Время")
+        elif k == "remind_offsets":
+            if not isinstance(v, list) or any(isinstance(x, bool) or not isinstance(x, int) for x in v):
+                raise DomainError(400, "Напоминания: ожидается список минут")
+            if any(not 1 <= x <= MAX_REMIND_MINUTES for x in v):
+                raise DomainError(400, "Напоминание: от 1 минуты до 24 часов до начала задачи")
+            uniq = sorted(set(v), reverse=True)
+            if len(uniq) > MAX_REMIND_OFFSETS:
+                raise DomainError(400, f"Не больше {MAX_REMIND_OFFSETS} напоминаний")
+            clean[k] = ",".join(str(x) for x in uniq)
         elif k == "tz":
             name = str(v).strip()
             try:
@@ -2786,6 +3066,22 @@ def check_row(row, u: dict | None, task, now: datetime) -> tuple[bool, str]:
     local = utc_to_local(now, u["zone"])
     day = row["occ_day"]
 
+    if kind == "habit":  # task здесь — строка привычки (+ done_today)
+        habit = task
+        if not habit: return False, "привычка удалена"
+        if habit["user_id"] != u["user_id"]: return False, "привычка принадлежит другому пользователю"
+        if not habit["remind_time"]: return False, "напоминание выключено"
+        if habit["remind_time"] != row["task_time"]: return False, "время напоминания изменено"
+        if local.date().isoformat() != day: return False, "день уже закончился"
+        d = date.fromisoformat(day)
+        days = habit_days_list(habit["remind_days"])
+        if days and d.weekday() not in days: return False, "привычка не запланирована на этот день недели"
+        fire = local_to_utc(at_clock(d, habit["remind_time"]), u["zone"])
+        if iso(fire) != row["fire_at"]: return False, "время отправки изменено"
+        if now >= fire + HABIT_GRACE: return False, "время отправки прошло"
+        if habit.get("done_today"): return False, "привычка уже отмечена сегодня"
+        return True, ""
+
     if kind in DIGESTS:
         on_k, time_k = DIGESTS[kind]
         if not s[on_k]: return False, "этот вид уведомлений выключен"
@@ -2797,12 +3093,13 @@ def check_row(row, u: dict | None, task, now: datetime) -> tuple[bool, str]:
 
     if kind in ("remind", "snooze"):
         off = row["offset_min"]
+        offs = offsets_of(u)
         if not task: return False, "задача удалена"
         if task["user_id"] != u["user_id"]: return False, "задача принадлежит другому пользователю"
         if task["remind_min"] == -1: return False, "для задачи отключены напоминания"
         if not task["due_time"]: return False, "у задачи нет времени"
         if kind == "remind":
-            if off not in REMIND_OFFSETS or not s[f"remind_{off}"]: return False, f"напоминание за {off} мин выключено"
+            if off not in offs: return False, f"напоминание за {off} мин выключено"
             if task["due_time"] != row["task_time"]: return False, "время задачи изменено"
         if not occurs(task, day): return False, "задача перенесена или не запланирована на эту дату"
         if is_done(task, day): return False, "задача уже выполнена"
@@ -2810,8 +3107,8 @@ def check_row(row, u: dict | None, task, now: datetime) -> tuple[bool, str]:
             return (True, "") if local.date().isoformat() == day else (False, "день уже закончился")
         start = at_clock(date.fromisoformat(day), task["due_time"])
         if local >= start: return False, "время начала задачи уже наступило"
-        for smaller in REMIND_OFFSETS:  # более позднее напоминание уже открылось — это устарело
-            if smaller < off and s[f"remind_{smaller}"] and start - timedelta(minutes=smaller) <= local:
+        for smaller in offs:  # более позднее напоминание уже открылось — это устарело
+            if smaller < off and start - timedelta(minutes=smaller) <= local:
                 return False, "уже наступило время более позднего напоминания"
         return True, ""
     return False, "неизвестный тип уведомления"
@@ -2822,7 +3119,7 @@ def reminder_candidates(u: dict, tasks, now: datetime):
     (напоминание за 30 минут до 00:10 наступает ещё «вчера»)."""
     s = u["s"]
     if not s["enabled"]: return
-    offsets = [o for o in REMIND_OFFSETS if s[f"remind_{o}"]]
+    offsets = offsets_of(u)
     if not offsets: return
     tz = u["zone"]
     local = utc_to_local(now, tz)
@@ -2843,6 +3140,30 @@ def reminder_candidates(u: dict, tasks, now: datetime):
                        "task_time": r["due_time"], "offset_min": off, "title": r["text"],
                        "fire_at": iso(local_to_utc(fire_local, tz)),
                        "dedup_key": f"remind:{u['user_id']}:{r['id']}:{day}:{r['due_time']}:{off}"}
+
+
+def habit_candidates(u: dict, habits, done: set, now: datetime):
+    """Привычки, время напоминания которых наступило сегодня (по часам пользователя): [время, время + 30 мин).
+    done — множество (habit_id, день) уже отмеченных; отмеченную привычку не напоминаем."""
+    s = u["s"]
+    if not s["enabled"]: return
+    local = utc_to_local(now, u["zone"])
+    d = local.date()
+    day = d.isoformat()
+    for h in habits:
+        if h["user_id"] != u["user_id"] or not h["remind_time"]: continue
+        days = habit_days_list(h["remind_days"])
+        if days and d.weekday() not in days: continue
+        try:
+            fire = local_to_utc(at_clock(d, h["remind_time"]), u["zone"])
+        except (ValueError, TypeError):
+            continue
+        if not (fire <= now < fire + HABIT_GRACE): continue
+        if h["remind_set_at"] and iso(fire) <= h["remind_set_at"]: continue  # время настроено уже после него
+        if (h["id"], day) in done: continue
+        yield {"kind": "habit", "user_id": u["user_id"], "task_id": None, "habit_id": h["id"], "occ_day": day,
+               "task_time": h["remind_time"], "offset_min": None, "title": h["text"], "fire_at": iso(fire),
+               "dedup_key": f"habit:{u['user_id']}:{h['id']}:{day}:{h['remind_time']}"}
 
 
 def digest_candidates(u: dict, now: datetime):
@@ -2866,10 +3187,10 @@ async def claim(db, cand: dict, chat_id: int) -> int | None:
     пересчёта), иначе None — такая отправка уже есть в журнале (отправлена, ждёт, провалена или пропущена)."""
     now = iso(utcnow())
     cur = await db.execute(
-        "INSERT OR IGNORE INTO notification_log (dedup_key, user_id, chat_id, kind, task_id, occ_day, task_time, offset_min, title, "
-        "fire_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
-        (cand["dedup_key"], cand["user_id"], chat_id, cand["kind"], cand["task_id"], cand["occ_day"], cand["task_time"],
-         cand["offset_min"], cand["title"], cand["fire_at"], now, now))
+        "INSERT OR IGNORE INTO notification_log (dedup_key, user_id, chat_id, kind, task_id, habit_id, occ_day, task_time, offset_min, title, "
+        "fire_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+        (cand["dedup_key"], cand["user_id"], chat_id, cand["kind"], cand["task_id"], cand.get("habit_id"), cand["occ_day"],
+         cand["task_time"], cand["offset_min"], cand["title"], cand["fire_at"], now, now))
     if cur.rowcount == 1:
         await db.commit()
         return cur.lastrowid
@@ -2909,6 +3230,33 @@ async def fetch_task_row(db, task_id, uid: int | None = None):
         return await cur.fetchone()
 
 
+async def fetch_habit_row(db, habit_id, day: str | None = None):
+    """Привычка (dict) с флагом done_today — отмечена ли она в день day. None, если удалена."""
+    if habit_id is None: return None
+    async with db.execute("SELECT * FROM habits WHERE id = ?", (habit_id,)) as cur:
+        r = await cur.fetchone()
+    if not r: return None
+    h = dict(r)
+    async with db.execute("SELECT 1 FROM habit_logs WHERE habit_id = ? AND day = ?", (habit_id, day or "")) as cur:
+        h["done_today"] = await cur.fetchone() is not None
+    return h
+
+
+async def fetch_subject(db, row):
+    """К чему относится запись журнала: привычка для kind='habit', иначе задача (или None для сводок)."""
+    if row["kind"] == "habit": return await fetch_habit_row(db, row["habit_id"], row["occ_day"])
+    return await fetch_task_row(db, row["task_id"])
+
+
+async def habit_changed(uid: int):
+    """Хук для мест, где меняется или удаляется привычка. Никогда не бросает исключений."""
+    try:
+        async with notif_db() as db:
+            await cancel_invalid_pending(db, user_id=uid)
+    except Exception:
+        log.exception("Не удалось пересчитать расписание напоминаний о привычках")
+
+
 async def deliver(db, log_id: int) -> str:
     """Одна попытка отправки записи журнала. Возвращает итоговый статус записи."""
     now = utcnow()
@@ -2921,7 +3269,7 @@ async def deliver(db, log_id: int) -> str:
     attempts = row["attempts"]
     try:
         u = await load_user(db, row["user_id"])
-        task = await fetch_task_row(db, row["task_id"])
+        task = await fetch_subject(db, row)
         ok, reason = check_row(row, u, task, now)  # актуальные дата, время и статус — перед КАЖДОЙ отправкой
         if not ok:
             await _finish(db, log_id, "cancelled", reason)
@@ -2973,7 +3321,7 @@ async def cancel_invalid_pending(db, user_id: int | None = None, task_id: int | 
     now, users, n = utcnow(), {}, 0
     for row in rows:
         if row["user_id"] not in users: users[row["user_id"]] = await load_user(db, row["user_id"])
-        ok, reason = check_row(row, users[row["user_id"]], await fetch_task_row(db, row["task_id"]), now)
+        ok, reason = check_row(row, users[row["user_id"]], await fetch_subject(db, row), now)
         if not ok:
             await db.execute("UPDATE notification_log SET status = 'cancelled', detail = ?, updated_at = ? WHERE id = ? AND status = 'pending'",
                              (f"расписание пересчитано: {reason}", iso(now), row["id"]))
@@ -3021,6 +3369,8 @@ async def build_message(db, row, u: dict, task, now: datetime):
     local = utc_to_local(now, u["zone"]) if u else utc_to_local(now, LOCAL_TZ)
     if kind == "test":
         return "🔔 <b>Тест уведомлений</b>\nЕсли вы это видите — доставка работает.", None
+    if kind == "habit":  # тип «обычное»
+        return f'📚 Время "{html.escape(task["text"])}"!', None
     if kind in ("remind", "snooze"):
         day = row["occ_day"]
         start = at_clock(date.fromisoformat(day), task["due_time"])
@@ -3295,12 +3645,25 @@ async def reminder_tick(now: datetime | None = None):
             users = await load_active_users(db)
             if users:
                 async with db.execute("SELECT * FROM tasks") as cur: tasks = await cur.fetchall()
+                async with db.execute("SELECT * FROM habits WHERE remind_time IS NOT NULL") as cur:
+                    habits = [dict(r) for r in await cur.fetchall()]
+                since = (now.date() - timedelta(days=2)).isoformat()
+                async with db.execute("SELECT habit_id, day FROM habit_logs WHERE day >= ?", (since,)) as cur:
+                    done = {(r["habit_id"], r["day"]) for r in await cur.fetchall()}
+                hmap = {h["id"]: h for h in habits}
+                tmap = {r["id"]: r for r in tasks}
+
+                def subject(c):
+                    if c["kind"] != "habit": return tmap.get(c["task_id"])
+                    h = hmap.get(c["habit_id"])
+                    return None if h is None else {**h, "done_today": (h["id"], c["occ_day"]) in done}
+
                 for u in users:
                     try:
-                        cands = list(reminder_candidates(u, tasks, now)) + list(digest_candidates(u, now))
-                        tmap = {r["id"]: r for r in tasks}
+                        cands = (list(reminder_candidates(u, tasks, now)) + list(digest_candidates(u, now))
+                                 + list(habit_candidates(u, habits, done, now)))
                         for c in cands:
-                            ok, _ = check_row(c, u, tmap.get(c["task_id"]), now)
+                            ok, _ = check_row(c, u, subject(c), now)
                             if not ok: continue
                             log_id = await claim(db, c, u["chat_id"])
                             if log_id: await deliver(db, log_id)
@@ -3352,8 +3715,7 @@ async def reminder_loop():
 # =====================================================================
 class NotifySettingsBody(BaseModel):
     enabled: bool | None = None
-    remind_30: bool | None = None
-    remind_10: bool | None = None
+    remind_offsets: list[int] | None = None
     morning_on: bool | None = None
     morning_time: str | None = None
     evening_on: bool | None = None
@@ -3423,8 +3785,18 @@ async def get_habits(request: Request, today: str | None = None):
 async def add_habit_api(habit: HabitCreate, request: Request):
     uid = await api_uid(request)
     async with aiosqlite.connect(DB_NAME) as db:
-        hid = await create_habit(db, habit.text, uid)
+        hid = await create_habit(db, habit.text, uid, time=habit.time, repeat=habit.repeat, days=habit.days,
+                                 remind_type=habit.remind_type)
     return {"status": "ok", "id": hid}
+
+
+@app.put("/api/habits/{habit_id}")
+async def update_habit_api(habit_id: int, habit: HabitCreate, request: Request):
+    uid = await api_uid(request)
+    async with aiosqlite.connect(DB_NAME) as db:
+        await update_habit(db, habit_id, habit.text, uid, time=habit.time, repeat=habit.repeat, days=habit.days,
+                           remind_type=habit.remind_type)
+    return {"status": "ok"}
 
 
 @app.post("/api/habits/{habit_id}/toggle")
@@ -3444,6 +3816,7 @@ async def delete_habit(habit_id: int, request: Request):
         if cur.rowcount == 0: raise DomainError(404, "Привычка не найдена")
         await db.execute("DELETE FROM habit_logs WHERE habit_id = ?", (habit_id,))
         await db.commit()
+    await habit_changed(uid)
     return {"status": "ok"}
 
 

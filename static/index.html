@@ -622,6 +622,13 @@ body{position:relative}
 .wd.on i{background:var(--green);border-color:var(--green);opacity:1}
 .wd.today span{color:var(--ink);font-weight:800}
 .wd.today i{opacity:.9}
+.habit-actions{display:flex;align-items:center;flex-shrink:0}
+.btn-edit{min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;background:none;border:none;color:var(--ink-2);cursor:pointer;border-radius:8px}
+.btn-edit svg{width:19px;height:19px}
+.habit-rem{display:block;font-size:12px;color:var(--ink-2);margin-top:2px}
+.hdays{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:10px}
+.hdays[hidden],#habitRemOpts[hidden]{display:none}
+.hdays .cb{padding:0;min-width:0;min-height:40px}
 
 /* тост: длинные тексты ошибок сервера переносятся по словам, а не по буквам */
 .toast{width:max-content;text-align:center;word-break:normal;overflow-wrap:anywhere}
@@ -703,6 +710,29 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
     .modal-overlay .modal { transform: none !important; }
 }
 
+/* ===== кнопка сохранения закреплена внизу окна ===== */
+.modal > .glass-btn.modal-save{position:sticky;bottom:calc(14px + env(safe-area-inset-bottom));z-index:5;box-shadow:0 0 0 14px #FFFCF5,0 40px 0 14px #FFFCF5}
+/* ===== свои напоминания до задачи ===== */
+.nt-dim{opacity:.5;pointer-events:none}
+.off-chips{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 12px}
+.off-chip{display:inline-flex;align-items:center;gap:2px;min-height:40px;padding:0 4px 0 14px;border-radius:99px;background:var(--green-l);border:1px solid var(--green);font-size:14px;font-weight:700}
+.off-chip button{width:36px;min-height:36px;border:0;background:none;color:var(--ink-2);font-size:14px;cursor:pointer}
+.off-add{display:flex;gap:8px;align-items:center}
+.off-add input[type=number]{flex:1 1 0;min-width:0}
+.off-add select{flex:0 0 auto;width:auto}
+#scopeSeg button{font-size:13px;padding:0 4px}
+/* ===== линия прогресса дня: листик, подпись, трек с розовым маркером ===== */
+.day-progress{padding:2px 2px 4px;margin-bottom:12px}
+.dp-row{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.dp-ico{width:30px;height:30px;border-radius:50%;background:var(--green-l);color:var(--green-d);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.dp-ico svg{width:17px;height:17px}
+.dp-label{font-size:15px;font-weight:700;min-width:0}
+.dp-num{font-variant-numeric:tabular-nums}
+.dp-track{position:relative;height:14px;border-radius:99px;background:#E3DEC9}
+.dp-fill{height:100%;min-width:14px;max-width:100%;border-radius:99px;background:var(--green-d);transition:width 680ms var(--motion-ease)}
+.dp-end{position:absolute;right:-3px;top:50%;transform:translateY(-50%);width:22px;height:22px;border-radius:50%;background:var(--pink);border:2px solid var(--pink-l);color:var(--green-d);display:flex;align-items:center;justify-content:center;box-shadow:0 1px 3px rgba(48,41,32,.15)}
+.dp-end svg{width:11px;height:11px}
+.dp-hint{margin-top:10px;font-size:13px;color:var(--ink-2)}
 </style>
 </head>
 <body>
@@ -728,7 +758,7 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
 
     <!-- Главная -->
     <div id="tab-home" class="tab-content active">
-        <div class="ring-wrap" id="ringWrap"></div>
+        <div class="day-progress" id="ringWrap"></div>
         <div class="next-event" id="nextEvent"></div>
         <div class="section-head">
             <h2>Задачи на сегодня</h2>
@@ -854,7 +884,7 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
                 <input type="time" id="tfTime" class="glass-input" style="width:100%;flex:none">
                 <div class="modal-label">Напоминание в Telegram (нужно время)</div>
                 <select id="tfRemind" class="glass-input">
-                    <option value="">По настройкам (за 30 и 10 минут)</option><option value="-1">Не напоминать об этой задаче</option>
+                    <option value="">По настройкам уведомлений</option><option value="-1">Не напоминать об этой задаче</option>
                 </select>
                 <div class="modal-label">Повторение</div>
                 <select id="repeatSel" class="glass-input" onchange="syncDateLabels()">
@@ -883,11 +913,23 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
     <div class="modal-overlay" id="newHabitModal" onclick="if(event.target === this) closeNewHabit()">
         <div class="modal">
             <div class="modal-head">
-                <span class="modal-title">Новая привычка</span>
+                <span class="modal-title" id="habitHead">Новая привычка</span>
                 <button class="btn-delete" onclick="closeNewHabit()" title="Закрыть">✕</button>
             </div>
-            <input type="text" id="habitInput" class="glass-input" placeholder="Название привычки..." onkeydown="if(event.key === 'Enter') submitHabit()">
-            <button class="glass-btn modal-save" onclick="submitHabit()">Добавить привычку</button>
+            <input type="text" id="habitInput" class="glass-input" placeholder="Название привычки..." onkeydown="if(event.key === 'Enter' && !event.isComposing) submitHabit()">
+            <div class="modal-label">Напоминание в Telegram (необязательно)</div>
+            <input type="time" id="habitTime" class="glass-input" style="width:100%;flex:none" oninput="buildHabitForm()" onchange="buildHabitForm()" aria-label="Время напоминания">
+            <div id="habitRemOpts" hidden>
+                <div class="modal-label">Частота</div>
+                <div class="seg" id="habitRepeatSeg" style="margin:0"></div>
+                <div class="hdays" id="habitDays" hidden></div>
+                <div class="modal-label">Тип напоминания</div>
+                <select id="habitRemType" class="glass-input">
+                    <option value="normal">Обычное</option>
+                </select>
+                <div class="task-meta" style="margin-top:8px">В это время бот пришлёт: 📚 Время "название привычки"!</div>
+            </div>
+            <button class="glass-btn modal-save" id="habitSave" onclick="submitHabit()">Добавить привычку</button>
         </div>
     </div>
 
@@ -1094,6 +1136,7 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
 
         // --- ГЛАВНАЯ ---
         const RING_COLORS = ['#87976F', '#B7C39B', '#F2BBDD', '#667750'];
+        const PEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>';
         const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>';
 
         function ringSvg(pct, fromPct = 0) {
@@ -1115,36 +1158,28 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
         let previousHomeRingDone = null;
         let homeRingAnimationFrame = 0;
 
-        function animateHomeProgress(ring, targetDone, total, targetPct) {
-            if (!ring) return;
+        function animateHomeProgress(box, fromDone, targetDone, total, fromPct, targetPct) {
+            if (!box) return;
             if (homeRingAnimationFrame) cancelAnimationFrame(homeRingAnimationFrame);
             const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-            const number = ring.querySelector('.ring-num');
-            const fromDone = Number(ring.dataset.fromDone || 0);
-            const startedAt = performance.now();
+            const num = box.querySelector('.dp-num'), fill = box.querySelector('.dp-fill');
             const duration = reducedMotion ? 0 : 680;
-            const segments = ring.querySelectorAll('.ring-segment');
-            const tick = (now) => {
-                const t = duration ? Math.min(1, (now - startedAt) / duration) : 1;
-                const eased = 1 - Math.pow(1 - t, 3);
-                if (number && total) number.textContent = `${Math.round(fromDone + (targetDone - fromDone) * eased)}/${total}`;
-                if (t < 1) homeRingAnimationFrame = requestAnimationFrame(tick);
-                else homeRingAnimationFrame = 0;
-            };
-            // Start the SVG dash transition only after the initial offsets have painted.
-            segments.forEach(segment => {
-                segment.style.transition = 'none';
-                segment.getBoundingClientRect();
-                segment.style.transition = reducedMotion ? 'none' : 'stroke-dashoffset 680ms cubic-bezier(.22,.61,.36,1)';
-                segment.setAttribute('stroke-dashoffset', segment.dataset.ringTarget || '0');
-            });
-            if (duration) homeRingAnimationFrame = requestAnimationFrame(tick);
-            else {
-                if (number && total) number.textContent = `${targetDone}/${total}`;
-                homeRingAnimationFrame = 0;
+            const startedAt = performance.now();
+            // ширина линии меняется CSS-переходом: сначала фиксируем старое значение, затем ставим новое
+            if (fill) {
+                fill.style.transition = 'none';
+                fill.style.width = fromPct + '%';
+                fill.getBoundingClientRect();
+                fill.style.transition = reducedMotion ? 'none' : '';
+                fill.style.width = targetPct + '%';
             }
-            ring.dataset.fromDone = String(targetDone);
-            ring.dataset.targetPct = String(targetPct);
+            if (!duration || !num) { if (num) num.textContent = targetDone; homeRingAnimationFrame = 0; return; }
+            const tick = (now) => {
+                const t = Math.min(1, (now - startedAt) / duration);
+                num.textContent = Math.round(fromDone + (targetDone - fromDone) * (1 - Math.pow(1 - t, 3)));
+                homeRingAnimationFrame = t < 1 ? requestAnimationFrame(tick) : 0;
+            };
+            homeRingAnimationFrame = requestAnimationFrame(tick);
         }
 
         async function renderHome() {
@@ -1167,17 +1202,19 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
             const total = tasks.length;
             const done = tasks.filter(t => t.completed).length;
             const pct = total ? done / total * 100 : 0;
-            const ringWrap = document.getElementById('ringWrap');
+            const bar = $('ringWrap');
             const fromPct = previousHomeRingPct;
             const fromDone = previousHomeRingDone === null ? 0 : previousHomeRingDone;
-            ringWrap.innerHTML = ringSvg(pct, fromPct) + `
-                <div class="ring-center">
-                    <div class="ring-num">${total ? fromDone + '/' + total : '—'}</div>
-                    <div class="ring-label">${total ? 'задач выполнено сегодня' : 'на сегодня задач нет'}</div>
-                </div>`;
-            const ringNum = ringWrap.querySelector('.ring-num');
-            if (ringNum) ringWrap.dataset.fromDone = String(fromDone);
-            animateHomeProgress(ringWrap, done, total, pct);
+            const LEAF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19C5 10 11 5 20 5c0 9-5 15-14 15z"/><path d="M5 19l7-7"/></svg>';
+            const hint = !total ? 'Добавьте первую задачу 🌱' : done === 0 ? 'Начни с малого 🌱' : done >= total ? 'Всё сделано — отличный день 🌸' : pct >= 50 ? 'Больше половины пути 🌼' : 'Хорошее начало 🌿';
+            bar.innerHTML = `
+                <div class="dp-row">
+                    <span class="dp-ico">${LEAF}</span>
+                    <span class="dp-label">${total ? `Сегодня · <span class="dp-num">${fromDone}</span> из ${total} ${plural(total, ['задачи', 'задач', 'задач'])}` : 'Сегодня · задач нет'}</span>
+                </div>
+                <div class="dp-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}"><div class="dp-fill" style="width:${fromPct}%"></div><span class="dp-end">${LEAF}</span></div>
+                <div class="dp-hint">${hint}</div>`;
+            animateHomeProgress(bar, fromDone, done, total, fromPct, pct);
             previousHomeRingPct = pct;
             previousHomeRingDone = done;
 
@@ -1194,7 +1231,9 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
                 box.innerHTML = '<div class="empty-card">На сегодня задач нет.<br>Добавьте первую — это займёт пару секунд.<br><button class="glass-btn" onclick="openNewTask()">Добавить задачу</button></div>';
             } else {
                 const sorted = [...tasks].sort((a, b) => a.completed - b.completed);
-                sorted.slice(0, 5).forEach(t => box.appendChild(taskRow(t)));
+                const open = sorted.filter(t => !t.completed);
+                if (open.length) open.slice(0, 5).forEach(t => box.appendChild(taskRow(t)));
+                else box.innerHTML = '<div class="empty-card">Все задачи на сегодня выполнены 🎉<br><button class="ghost-btn" style="min-height:44px;margin-top:12px" onclick="openDone()">Выполненные</button></div>';
             }
             goals = gl; homeLife = lgl;
             document.getElementById('homeGoals').innerHTML = (lgl.length
@@ -1235,7 +1274,7 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
         const PRIO = { 1: 'Низкий', 2: 'Средний', 3: 'Высокий' };
         const REMIND = { '-1': 'Не напоминать' };
         const REPEAT_NAMES = { none: 'Один раз', daily: 'Ежедневно', weekdays: 'По будням' };
-        const SCOPES = { today: 'Сегодня', week: 'Неделя', all: 'Все' };
+        const SCOPES = { today: 'Сегодня', week: 'Неделя', all: 'Все', done: 'Выполненные' };
         let taskScope = 'today', taskPrio = 0, allTasks = [], taskCache = {}, openTaskId = null, editingId = null, formLevel = 2;
 
         function cacheTasks(l) { l.forEach(t => taskCache[t.id] = t); }
@@ -1324,6 +1363,7 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
         }
 
         function buildToolbar() {
+            $('quickInput').parentNode.style.display = taskScope === 'done' ? 'none' : '';
             $('scopeSeg').innerHTML = Object.entries(SCOPES).map(([k, v]) => `<button class="${k === taskScope ? 'on' : ''}" onclick="setScope('${k}')">${v}</button>`).join('');
             $('prioChips').innerHTML = [[0, 'Все'], [3, 'Высокий'], [2, 'Средний'], [1, 'Низкий']].map(([k, v]) => `<button class="cb ${k === taskPrio ? 'on' : ''}" onclick="setPrio(${k})">${v}</button>`).join('');
         }
@@ -1344,23 +1384,26 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
 
         function applyTasks() {
             const sort = $('sortSel').value;
-            let l = allTasks.filter(t => !taskPrio || t.level === taskPrio);
+            const doneView = taskScope === 'done';
+            let l = allTasks.filter(t => (doneView ? t.completed : !t.completed) && (!taskPrio || t.level === taskPrio));
             const by = {
                 prio: (a, b) => b.level - a.level,
                 due: (a, b) => ((a.due || '9') + (a.time || '')).localeCompare((b.due || '9') + (b.time || '')),
                 name: (a, b) => a.text.localeCompare(b.text, 'ru')
             };
             if (by[sort]) l = [...l].sort((a, b) => a.completed - b.completed || by[sort](a, b));
-            const od = allTasks.filter(t => t.overdue);
-            $('overdueBar').innerHTML = od.length ? `<div class="warn-bar"><span>Просрочено: ${od.length}</span><button class="link-btn" onclick="carryOver()">Перенести на сегодня</button></div>` : '';
+            const od = allTasks.filter(t => t.overdue && !t.completed);
+            $('overdueBar').innerHTML = od.length && !doneView ? `<div class="warn-bar"><span>Просрочено: ${od.length}</span><button class="link-btn" onclick="carryOver()">Перенести на сегодня</button></div>` : '';
             const list = $('taskList'); list.innerHTML = '';
             if (!l.length) {
-                list.innerHTML = allTasks.length
+                list.innerHTML = doneView ? '<div class="empty-card">Выполненных задач пока нет.<br>Отметьте задачу — она появится здесь.</div>'
+                    : (allTasks.length && !allTasks.some(t => !t.completed)) ? '<div class="empty-card">Все задачи выполнены 🎉<br>Они лежат в разделе «Выполненные».</div>'
+                    : allTasks.length
                     ? '<div class="empty-card">Нет задач с таким фильтром.<br><button class="ghost-btn" style="min-height:44px;margin-top:12px" onclick="setPrio(0)">Сбросить фильтр</button></div>'
                     : '<div class="empty-card">Здесь пока пусто.<br>Введите название выше — этого достаточно.</div>';
                 return;
             }
-            l.forEach(t => list.appendChild(taskRow(t)));
+            l.forEach(t => list.appendChild(doneView ? doneRow(t) : taskRow(t)));
         }
 
         const expandedTasks = new Set();
@@ -1410,9 +1453,45 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
         }
 
         async function toggleTask(id) {
-            try { await api(`/api/tasks/${id}/toggle?today=${todayStr()}`, 'POST'); await refreshTasks(); }
+            try {
+                const was = taskCache[id] && taskCache[id].completed;
+                await api(`/api/tasks/${id}/toggle?today=${todayStr()}`, 'POST'); await refreshTasks();
+                if (!was) toast('Задача выполнена', { label: 'Отменить', ms: 4000, fn: () => toggleTask(id) });
+            }
             catch (e) { fail(e, 'Не удалось обновить задачу'); }
         }
+
+        const UNDO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>';
+
+        // Строка в разделе «Выполненные»: дата выполнения, дата создания, вернуть и удалить
+        function doneRow(t) {
+            const meta = [];
+            if (t.done_on) meta.push('выполнено ' + shortDate(t.done_on));
+            if (t.created) meta.push('создана ' + shortDate(t.created));
+            if (t.category) meta.push(escapeHtml(t.category));
+            const item = document.createElement('div');
+            item.dataset.tid = t.id;
+            item.className = 'task-item completed';
+            item.innerHTML = `
+                <div class="task-left">
+                    <div class="task-body" onclick="openTask(${t.id})">
+                        <span class="task-text">${escapeHtml(t.text)}</span>
+                        <span class="task-meta">${meta.join(' · ')}</span>
+                    </div>
+                </div>
+                <div class="habit-actions">
+                    <button class="btn-edit" onclick="restoreTask(${t.id})" title="Вернуть в активные" aria-label="Вернуть в активные">${UNDO}</button>
+                    <button class="btn-delete" onclick="deleteTask(${t.id})" title="Удалить навсегда" aria-label="Удалить навсегда">${TRASH}</button>
+                </div>`;
+            return item;
+        }
+
+        async function restoreTask(id) {
+            try { await api(`/api/tasks/${id}/toggle?today=${todayStr()}`, 'POST'); await refreshTasks(); toast('Задача возвращена в активные'); }
+            catch (e) { fail(e, 'Не удалось вернуть задачу'); }
+        }
+
+        function openDone() { taskScope = 'done'; go('tasks'); }
 
         async function quickAdd() {
             const i = $('quickInput'), text = i.value.trim();
@@ -1502,7 +1581,7 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
             const n = t.subs.length, dn = t.subs.filter(x => x.done).length;
             const pct = n ? Math.round(dn / n * 100) : (t.completed ? 100 : 0);
             const one = t.repeat === 'none';
-            const rows = [['Приоритет', PRIO[t.level]], t.created && ['Создана', shortDate(t.created)],
+            const rows = [['Приоритет', PRIO[t.level]], t.created && ['Создана', shortDate(t.created)], t.completed && t.done_on && ['Выполнена', shortDate(t.done_on)],
                 [one ? 'План' : 'Начало', shortDate(t.planned)], t.due && [one ? 'Срок' : 'Конец', shortDate(t.due)], t.time && ['Время', t.time],
                 t.remind === -1 && ['Напоминание', REMIND[t.remind]], ['Повтор', REPEAT_NAMES[t.repeat]], t.category && ['Категория', t.category], (t.goals || []).length > 0 && ['Цель', t.goals.map(g => g.title).join(', ')]].filter(Boolean);
             const status = t.completed ? '<span class="chip ok">Выполнена</span>'
@@ -1520,7 +1599,8 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
                 <div class="modal-row"><input id="subInput" class="glass-input" placeholder="Новая подзадача" onkeydown="if(event.key === 'Enter') addSub()"><button class="glass-btn" style="padding:0 16px" onclick="addSub()">Добавить</button></div>
                 <div class="goal-actions"><button class="glass-btn" onclick="editTask()">Изменить</button><button class="ghost-btn" onclick="dupTask()">Дублировать</button>${canMove ? `<button class="ghost-btn" onclick="$('moveRow').classList.toggle('open')">Перенести</button>` : ''}</div>
                 ${canMove ? `<div class="move-row" id="moveRow"><input type="date" id="moveDate" class="glass-input" min="${todayStr()}" value="${addDays(todayStr(), 1)}"><button class="glass-btn" onclick="moveTask()">Готово</button></div>` : ''}
-                <button class="ghost-btn modal-save" style="color:var(--danger)" onclick="deleteTask(${t.id})">Удалить задачу</button>`;
+                ${t.completed ? `<button class="ghost-btn modal-save" onclick="closeTask(); restoreTask(${t.id})">Вернуть в активные</button>` : ''}
+                <button class="ghost-btn modal-save" style="color:var(--danger)" onclick="deleteTask(${t.id})">Удалить навсегда</button>`;
         }
 
         async function subCall(fn, err) {
@@ -1673,13 +1753,48 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
                 <label class="sw"><input type="checkbox" ${on ? 'checked' : ''} ${dis ? 'disabled' : ''} aria-label="${title}" onchange="setNotify({${key}: this.checked})"><i></i></label></div></div>`;
         }
 
+        function fmtOffset(m) {
+            if (m % 1440 === 0) return `${m / 1440} д`;
+            if (m % 60 === 0) return `${m / 60} ч`;
+            return `${m} мин`;
+        }
+
+        function offsetsHtml(s) {
+            const l = s.remind_offsets || [];
+            const chips = l.length
+                ? l.map(m => `<span class="off-chip">за ${fmtOffset(m)}<button type="button" aria-label="Убрать напоминание за ${fmtOffset(m)}" onclick="removeOffset(${m})">✕</button></span>`).join('')
+                : '<div class="nt-s">Напоминаний нет — добавьте первое</div>';
+            return `<div class="nt-t">Когда напоминать</div>
+                <div class="nt-s" style="margin-bottom:10px">Сообщение в Telegram придёт за выбранное время до начала задачи. Можно добавить несколько.</div>
+                <div class="off-chips">${chips}</div>
+                <div class="off-add">
+                    <input type="number" id="offVal" class="glass-input" inputmode="numeric" min="1" placeholder="Например: 45" aria-label="За сколько до задачи" onkeydown="if(event.key === 'Enter') addOffset()">
+                    <select id="offUnit" class="glass-input" aria-label="Единица времени"><option value="1">мин</option><option value="60">ч</option><option value="1440">дн</option></select>
+                    <button class="glass-btn" style="padding:0 16px" onclick="addOffset()">Добавить</button>
+                </div>`;
+        }
+
+        function addOffset() {
+            const v = parseInt($('offVal').value, 10), m = v * (+$('offUnit').value);
+            if (!(v > 0)) { toast('Введите число больше нуля'); return; }
+            if (m > 1440) { toast('Не раньше чем за 24 часа до задачи'); return; }
+            const cur = ntState.remind_offsets || [];
+            if (cur.includes(m)) { toast('Такое напоминание уже есть'); return; }
+            if (cur.length >= 8) { toast('Не больше 8 напоминаний'); return; }
+            setNotify({ remind_offsets: [...cur, m].sort((a, b) => b - a) });
+        }
+
+        function removeOffset(m) {
+            setNotify({ remind_offsets: (ntState.remind_offsets || []).filter(x => x !== m) });
+        }
+
         function renderNotify() {
             const s = ntState;
             const zones = TZ_LIST.includes(s.tz) ? TZ_LIST : [s.tz, ...TZ_LIST];
             $('notifyBody').innerHTML = `
                 <div class="glass-panel">${ntRow('Все уведомления', 'Общий выключатель для бота и приложения', 'enabled')}</div>
                 <div class="nt-sec">Перед задачей со временем</div>
-                <div class="glass-panel">${ntRow('За 30 минут', '', 'remind_30')}${ntRow('За 10 минут', '', 'remind_10')}</div>
+                <div class="glass-panel ${s.enabled ? '' : 'nt-dim'}">${offsetsHtml(s)}</div>
                 <div class="nt-sec">Сводки</div>
                 <div class="glass-panel">${ntRow('Утренний план', 'Задачи и события на сегодня', 'morning_on', 'morning_time')}
                     ${ntRow('Вечерний итог', 'Сколько сделано и что осталось', 'evening_on', 'evening_time')}
@@ -1762,6 +1877,12 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
             return 'Отметьте сегодня — начнётся серия';
         }
 
+        function habitRemindText(h) {
+            const r = h.remind;
+            if (!r) return '';
+            return `🔔 ${r.time} · ${r.repeat === 'days' ? r.days.map(i => DAYS[i]).join(', ') : 'каждый день'}`;
+        }
+
         function renderHabits(habits) {
             const list = document.getElementById('habitList');
             list.innerHTML = '';
@@ -1781,10 +1902,14 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
                         <div class="task-body" style="cursor:default">
                             <span class="task-text">${escapeHtml(habit.text)}</span>
                             <span class="task-meta">${habitMeta(habit)}</span>
+                            ${habit.remind ? `<span class="habit-rem">${habitRemindText(habit)}</span>` : ''}
                             <div class="week-dots">${habit.week.map(d => `<button type="button" class="wd ${d.done ? 'on' : ''} ${d.date === today ? 'today' : ''}" onclick="toggleHabit(${habit.id}, '${d.date}')" aria-pressed="${d.done}" aria-label="${shortDate(d.date)}: ${d.done ? 'выполнено' : 'не выполнено'}"><i></i><span>${DAYS[(new Date(d.date + 'T00:00').getDay() + 6) % 7]}</span></button>`).join('')}</div>
                         </div>
                     </div>
-                    <button class="btn-delete" onclick="deleteHabit(${habit.id})" title="Удалить" aria-label="Удалить">${TRASH}</button>
+                    <div class="habit-actions">
+                        <button class="btn-edit" onclick="openEditHabit(${habit.id})" title="Изменить" aria-label="Изменить привычку">${PEN}</button>
+                        <button class="btn-delete" onclick="deleteHabit(${habit.id})" title="Удалить" aria-label="Удалить">${TRASH}</button>
+                    </div>
                 `;
                 list.appendChild(item);
             });
@@ -1804,26 +1929,72 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
             } finally { habitBusy.delete(key); }
         }
 
-        function openNewHabit() {
-            document.getElementById('habitInput').value = '';
-            document.getElementById('newHabitModal').classList.add('open');
-            document.getElementById('habitInput').focus();
+        // Состояние формы привычки: id (при правке), частота и выбранные дни недели (0 — понедельник)
+        let habitForm = { id: null, repeat: 'daily', days: [] };
+        let habitSaving = false;
+
+        function buildHabitForm() {
+            $('habitRepeatSeg').innerHTML = [['daily', 'Каждый день'], ['days', 'По дням недели']]
+                .map(([k, v]) => `<button type="button" class="${habitForm.repeat === k ? 'on' : ''}" onclick="setHabitRepeat('${k}')">${v}</button>`).join('');
+            $('habitDays').hidden = habitForm.repeat !== 'days';
+            $('habitDays').innerHTML = DAYS.map((d, i) => {
+                const on = habitForm.days.includes(i);
+                return `<button type="button" class="cb ${on ? 'on' : ''}" aria-pressed="${on}" onclick="toggleHabitDay(${i})">${d}</button>`;
+            }).join('');
+            // частота и тип нужны только если задано время
+            $('habitRemOpts').hidden = !$('habitTime').value;
+        }
+        function setHabitRepeat(k) { habitForm.repeat = k; buildHabitForm(); }
+        function toggleHabitDay(i) {
+            habitForm.days = habitForm.days.includes(i) ? habitForm.days.filter(x => x !== i) : [...habitForm.days, i];
+            buildHabitForm();
+        }
+
+        function openHabitForm(h) {
+            const r = h && h.remind;
+            habitForm = { id: h ? h.id : null, repeat: r ? r.repeat : 'daily', days: r ? [...r.days] : [] };
+            $('habitHead').textContent = h ? 'Изменить привычку' : 'Новая привычка';
+            $('habitSave').textContent = h ? 'Сохранить' : 'Добавить привычку';
+            $('habitInput').value = h ? h.text : '';
+            $('habitTime').value = r ? r.time : '';
+            $('habitRemType').value = r ? r.type : 'normal';
+            buildHabitForm();
+            $('newHabitModal').classList.add('open');
+            $('habitInput').focus();
+        }
+        function openNewHabit() { openHabitForm(null); }
+        function openEditHabit(id) {
+            const h = habitsData.find(x => x.id === id);
+            if (h) openHabitForm(h);
         }
 
         function closeNewHabit() { document.getElementById('newHabitModal').classList.remove('open'); }
 
         async function submitHabit() {
-            const input = document.getElementById('habitInput');
-            const text = input.value.trim();
+            if (habitSaving) return;
+            const text = $('habitInput').value.trim();
             if (!text) { toast('Введите название привычки'); return; }
-
+            const time = $('habitTime').value;
+            const body = { text };
+            if (time) {
+                if (habitForm.repeat === 'days' && !habitForm.days.length) { toast('Выберите хотя бы один день недели'); return; }
+                Object.assign(body, {
+                    time, repeat: habitForm.repeat,
+                    days: habitForm.repeat === 'days' ? [...habitForm.days].sort((a, b) => a - b) : [],
+                    remind_type: $('habitRemType').value
+                });
+            }
+            const editing = habitForm.id;
+            habitSaving = true;
             try {
-                await api('/api/habits', 'POST', { text });
+                if (editing) await api(`/api/habits/${editing}`, 'PUT', body);
+                else await api('/api/habits', 'POST', body);
                 closeNewHabit();
                 await loadHabits();
+                toast(editing ? 'Изменения сохранены' : 'Привычка добавлена');
             } catch (err) {
-                fail(err, 'Не удалось добавить привычку');
-            }
+                fail(err, 'Не удалось сохранить привычку');
+            } finally { habitSaving = false; }
         }
 
         function deleteHabit(id) {
