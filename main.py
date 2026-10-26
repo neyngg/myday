@@ -2781,6 +2781,17 @@ NOTIFY_MIGRATIONS = [
         "UPDATE notification_settings SET remind_offsets = CASE WHEN remind_30 AND remind_10 THEN '30,10' "
         "WHEN remind_30 THEN '30' WHEN remind_10 THEN '10' ELSE '' END",
     ]),
+    # Elo: elo_user — с какого дня ведётся рейтинг; elo_snap/elo_plan — «изначальный» план дня (снимок утром);
+    # elo_log — итог каждого завершённого дня (зона, изменение, рейтинг после).
+    ("elo_008_rating", [
+        "CREATE TABLE IF NOT EXISTS elo_user (user_id INTEGER PRIMARY KEY, start_day TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS elo_snap (user_id INTEGER NOT NULL, day TEXT NOT NULL, PRIMARY KEY (user_id, day))",
+        "CREATE TABLE IF NOT EXISTS elo_plan (user_id INTEGER NOT NULL, day TEXT NOT NULL, task_id INTEGER NOT NULL, "
+        "PRIMARY KEY (user_id, day, task_id))",
+        "CREATE TABLE IF NOT EXISTS elo_log (user_id INTEGER NOT NULL, day TEXT NOT NULL, planned INTEGER NOT NULL, "
+        "done INTEGER NOT NULL, zone TEXT NOT NULL, delta INTEGER NOT NULL, rating INTEGER NOT NULL, "
+        "PRIMARY KEY (user_id, day))",
+    ]),
 ]
 
 
@@ -3660,6 +3671,10 @@ async def reminder_tick(now: datetime | None = None):
 
                 for u in users:
                     try:
+                        await elo_sync(db, u, now)  # утренний снимок плана и пересчёт завершённых дней
+                    except Exception:
+                        log.exception("Сбой пересчёта Elo пользователя %s", u["user_id"])
+                    try:
                         cands = (list(reminder_candidates(u, tasks, now)) + list(digest_candidates(u, now))
                                  + list(habit_candidates(u, habits, done, now)))
                         for c in cands:
@@ -3711,6 +3726,113 @@ async def reminder_loop():
 
 
 # =====================================================================
+#  ELO (одиночный режим)
+#  Рейтинг считается раз в сутки по проценту выполнения ИЗНАЧАЛЬНОГО плана дня:
+#    80–100 % -> +15, 40–79 % -> +5, 0–39 % -> -10.
+#  Задачи, добавленные в течение дня, в план не входят (нельзя нафармить мелочью).
+#  День без задач — выходной (0), но не больше 2 пустых дней за последние 7; третий — как красная зона (-10).
+# =====================================================================
+ELO_START = 1000
+ELO_DELTAS = {"green": 15, "yellow": 5, "red": -10, "free": 0}
+ELO_FREE_PER_WEEK = 2
+
+
+def elo_zone(planned: int, done: int) -> str:
+    if done * 100 >= 80 * planned: return "green"
+    if done * 100 >= 40 * planned: return "yellow"
+    return "red"
+
+
+async def elo_snapshot(db, uid: int, day: str):
+    """Фиксирует план дня (один раз, при первом пересчёте в этот день)."""
+    async with db.execute("SELECT 1 FROM elo_snap WHERE user_id = ? AND day = ?", (uid, day)) as cur:
+        if await cur.fetchone(): return
+    async with db.execute("SELECT * FROM tasks WHERE user_id = ?", (uid,)) as cur:
+        rows = await cur.fetchall()
+    await db.execute("INSERT OR IGNORE INTO elo_snap (user_id, day) VALUES (?, ?)", (uid, day))
+    for r in rows:
+        if occurs(r, day):
+            await db.execute("INSERT OR IGNORE INTO elo_plan (user_id, day, task_id) VALUES (?, ?, ?)", (uid, day, r["id"]))
+    await db.commit()
+
+
+async def elo_planned_done(db, uid: int, day: str) -> tuple[int, int]:
+    """(запланировано, выполнено из запланированного). Для дня без снимка (сервер был выключен) план берётся по текущим данным."""
+    async with db.execute("SELECT 1 FROM elo_snap WHERE user_id = ? AND day = ?", (uid, day)) as cur:
+        snapped = await cur.fetchone() is not None
+    if snapped:
+        async with db.execute("SELECT COUNT(*) FROM elo_plan WHERE user_id = ? AND day = ?", (uid, day)) as cur:
+            planned = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM elo_plan p JOIN completions c ON c.task_id = p.task_id AND c.day = p.day "
+                              "WHERE p.user_id = ? AND p.day = ?", (uid, day)) as cur:
+            done = (await cur.fetchone())[0]
+        return planned, done
+    async with db.execute("SELECT * FROM tasks WHERE user_id = ?", (uid,)) as cur:
+        ids = [r["id"] for r in await cur.fetchall() if occurs(r, day)]
+    if not ids: return 0, 0
+    async with db.execute(f"SELECT COUNT(*) FROM completions WHERE day = ? AND task_id IN ({_marks(ids)})", [day] + ids) as cur:
+        return len(ids), (await cur.fetchone())[0]
+
+
+async def elo_day_result(db, uid: int, day: str, planned: int, done: int) -> tuple[str, int]:
+    """(зона, изменение рейтинга) для дня с учётом лимита выходных за последние 7 дней."""
+    if planned > 0:
+        zone_ = elo_zone(planned, done)
+        return zone_, ELO_DELTAS[zone_]
+    d = date.fromisoformat(day)
+    async with db.execute("SELECT COUNT(*) FROM elo_log WHERE user_id = ? AND planned = 0 AND day >= ? AND day < ?",
+                          (uid, (d - timedelta(days=6)).isoformat(), day)) as cur:
+        empty_before = (await cur.fetchone())[0]
+    zone_ = "free" if empty_before < ELO_FREE_PER_WEEK else "red"
+    return zone_, ELO_DELTAS[zone_]
+
+
+async def elo_rating(db, uid: int) -> int:
+    async with db.execute("SELECT COALESCE(SUM(delta), 0) FROM elo_log WHERE user_id = ?", (uid,)) as cur:
+        return ELO_START + (await cur.fetchone())[0]
+
+
+async def elo_sync(db, u: dict, now: datetime | None = None):
+    """Снимок плана на сегодня + закрытие всех завершённых дней, которые ещё не посчитаны."""
+    uid = u["user_id"]
+    today = utc_to_local(now or utcnow(), u["zone"]).date()
+    async with db.execute("SELECT start_day FROM elo_user WHERE user_id = ?", (uid,)) as cur:
+        r = await cur.fetchone()
+    if r: start = date.fromisoformat(r[0])
+    else:
+        start = today
+        await db.execute("INSERT OR IGNORE INTO elo_user (user_id, start_day) VALUES (?, ?)", (uid, today.isoformat()))
+    await elo_snapshot(db, uid, today.isoformat())
+    async with db.execute("SELECT day FROM elo_log WHERE user_id = ?", (uid,)) as cur:
+        settled = {x[0] for x in await cur.fetchall()}
+    d = start
+    while d < today:
+        k = d.isoformat()
+        if k not in settled:
+            planned, done = await elo_planned_done(db, uid, k)
+            zone_, delta = await elo_day_result(db, uid, k, planned, done)
+            rating = await elo_rating(db, uid) + delta
+            await db.execute("INSERT OR IGNORE INTO elo_log (user_id, day, planned, done, zone, delta, rating) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                             (uid, k, planned, done, zone_, delta, rating))
+        d += timedelta(days=1)
+    await db.commit()
+
+
+async def elo_view(db, u: dict) -> dict:
+    await elo_sync(db, u)
+    uid = u["user_id"]
+    today = utc_to_local(utcnow(), u["zone"]).date().isoformat()
+    planned, done = await elo_planned_done(db, uid, today)
+    zone_, delta = await elo_day_result(db, uid, today, planned, done)
+    # рейтинг до последнего закрытого дня — от него окно звания на главной начинает анимацию
+    async with db.execute("SELECT rating FROM elo_log WHERE user_id = ? ORDER BY day DESC LIMIT 2", (uid,)) as cur:
+        last = [r[0] for r in await cur.fetchall()]
+    prev = last[1] if len(last) > 1 else ELO_START
+    return {"rating": await elo_rating(db, uid), "prev_rating": prev, "today_delta": delta, "today_zone": zone_,
+            "today_planned": planned, "today_done": done}
+
+
+# =====================================================================
 #  API уведомлений (приложение)
 # =====================================================================
 class NotifySettingsBody(BaseModel):
@@ -3724,6 +3846,13 @@ class NotifySettingsBody(BaseModel):
     overdue_time: str | None = None
     tz: str | None = None
     tz_auto: bool | None = None
+
+
+@app.get("/api/elo")
+async def get_elo(request: Request):
+    u = await api_user(request)
+    async with notif_db() as db:
+        return {"elo": await elo_view(db, u)}
 
 
 @app.get("/api/notifications/settings")
