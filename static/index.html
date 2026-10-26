@@ -2954,6 +2954,8 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
                 if (document.fonts && document.fonts.ready) await Promise.race([document.fonts.ready, new Promise(resolve => setTimeout(resolve, 1200))]);
                 // Даём браузеру применить стили и отрисовать карточки перед плавным переходом.
                 await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                // После полной загрузки оставляем стартовый экран ещё на 1 секунду.
+                await new Promise(resolve => setTimeout(resolve, 1000));
             } catch (e) {
                 console.error('Ошибка подготовки стартового экрана', e);
             } finally {
