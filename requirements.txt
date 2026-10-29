@@ -3,3 +3,4 @@ uvicorn
 aiogram
 aiosqlite
 pydantic
+python-dotenv
