@@ -49,8 +49,16 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# Токен берётся из переменной окружения BOT_TOKEN
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8241348815:AAH3AVgUQqpZCrPpXrJbaO5ddakAwNtheLQ")
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from dotenv import load_dotenv
+
+# Загружаем переменные из скрытого файла .env
+load_dotenv()
+
+# Токен берётся из переменной окружения BOT_TOKEN (без дефолтного значения!)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://mydailyday.duckdns.org")
 # Часовой пояс пользователя: «сегодня» для бота и напоминаний считается в нём, а не по часам сервера (на хостинге это UTC)
 TZ_NAME = os.getenv("TZ_NAME", "Asia/Yekaterinburg")
@@ -67,7 +75,7 @@ except Exception:  # нет базы часовых поясов — работ�
 
 MAX_PLAN_AHEAD_DAYS = 730  # дальше двух лет перенести задачу нельзя
 HABIT_BACKFILL_DAYS = 30  # привычку можно отметить задним числом не глубже чем на месяц
-PLAN_LIMIT = 10  # сколько задач и привычек показывать в плане в Telegram
+PLAN_LIMIT = 10  # сколько задач и привычек показывать в плане в Telegramа
 MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня",
               "июля", "августа", "сентября", "октября", "ноября", "декабря"]
 
