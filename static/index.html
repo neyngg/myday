@@ -677,29 +677,12 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
 .tab-content.active { animation: mydayContentIn 220ms var(--motion-ease) both; }
 @keyframes mydayContentIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 /* Keep overlays in the render tree while closed so opacity/transform can animate both ways. */
-.modal-overlay {
-    display: flex;
-    opacity: 0;
-    visibility: hidden;
-    pointer-events: none;
-    transition: opacity var(--motion-panel) var(--motion-ease), visibility 0s linear var(--motion-panel);
-}
-.modal-overlay.open {
-    display: flex;
-    opacity: 1;
-    visibility: visible;
-    pointer-events: auto;
-    transition: opacity var(--motion-panel) var(--motion-ease), visibility 0s linear 0s;
-}
-.modal-overlay .modal {
-    opacity: 0;
-    transform: translate3d(0, 14px, 0);
-    animation: none;
-    transition: opacity var(--motion-panel) var(--motion-ease), transform var(--motion-panel) var(--motion-ease);
-    will-change: opacity, transform;
-}
-.modal-overlay.open .modal { opacity: 1; transform: translate3d(0, 0, 0); }
-.modal-overlay:not(.open) .modal { pointer-events: none; }
+/* Закрытое окно полностью убрано из отрисовки (display:none) — тёмная подложка не может «зависнуть» на экране. */
+.modal-overlay { display: none; }
+.modal-overlay.open { display: flex; animation: mydayOverlayIn var(--motion-panel) var(--motion-ease) both; }
+.modal-overlay.open .modal { animation: mydayModalIn var(--motion-panel) var(--motion-ease) both; }
+@keyframes mydayOverlayIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes mydayModalIn { from { opacity: 0; transform: translate3d(0, 14px, 0); } to { opacity: 1; transform: translate3d(0, 0, 0); } }
 .toast { transition: opacity var(--motion-ui) var(--motion-ease); }
 .sub-panel { animation: mydayContentIn 200ms var(--motion-ease) both; }
 .ring-segment { transition: stroke-dashoffset 680ms var(--motion-ease); }
@@ -748,8 +731,8 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
 .elo-chev{width:18px;height:18px;color:var(--ink-2);flex-shrink:0;margin-left:8px}
 
 /* ===== окно звания: появляется при первом заходе за день ===== */
-.elo-overlay{position:fixed;inset:0;z-index:400;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;background:rgba(48,41,32,.5);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .3s var(--motion-ease),visibility 0s linear .3s}
-.elo-overlay.open{opacity:1;visibility:visible;pointer-events:auto;transition:opacity .3s var(--motion-ease),visibility 0s}
+.elo-overlay{position:fixed;inset:0;z-index:400;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;background:rgba(48,41,32,.5);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);display:none}
+.elo-overlay.open{display:flex;animation:mydayOverlayIn .3s var(--motion-ease) both}
 .elo-circle{position:relative;width:min(300px,78vw);aspect-ratio:1;border-radius:50%;background:#FFFCF5;border:1px solid var(--line);box-shadow:0 18px 50px rgba(48,41,32,.28);display:flex;align-items:center;justify-content:center;transform:scale(.88);transition:transform .45s var(--motion-ease)}
 .elo-overlay.open .elo-circle{transform:scale(1)}
 .elo-circle.pop{animation:eloPop .6s var(--motion-ease)}
@@ -1007,11 +990,9 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
                 <div class="modal-label">Частота</div>
                 <div class="seg" id="habitRepeatSeg" style="margin:0"></div>
                 <div class="hdays" id="habitDays" hidden></div>
-                <div class="modal-label">Тип напоминания</div>
-                <select id="habitRemType" class="glass-input">
+                <select id="habitRemType" hidden>
                     <option value="normal">Обычное</option>
                 </select>
-                <div class="task-meta" style="margin-top:8px">В это время бот пришлёт: 📚 Время "название привычки"!</div>
             </div>
             <button class="glass-btn modal-save" id="habitSave" onclick="submitHabit()">Добавить привычку</button>
         </div>
@@ -1743,7 +1724,10 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
         }
 
         // --- карточка задачи ---
-        function openTask(id) { openTaskId = id; renderTaskDetail(); $('taskModal').classList.add('open'); }
+        function openTask(id) {
+            if (!taskCache[id]) return;  // задачи нет в кэше — иначе откроется пустое тёмное окно
+            openTaskId = id; renderTaskDetail(); $('taskModal').classList.add('open');
+        }
         function closeTask() { openTaskId = null; $('taskModal').classList.remove('open'); }
 
         function renderTaskDetail() {
