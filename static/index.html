@@ -711,7 +711,10 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
 }
 
 /* ===== кнопка сохранения закреплена внизу окна ===== */
-.modal > .glass-btn.modal-save{position:sticky;bottom:calc(14px + env(safe-area-inset-bottom));z-index:5;box-shadow:0 0 0 14px #FFFCF5,0 40px 0 14px #FFFCF5}
+.modal > .glass-btn.modal-save{position:static;box-shadow:none;background-image:none}
+/* окна прокручиваются пальцем; фон за окном не двигается */
+.modal-overlay{overflow:hidden}
+.modal{overflow-y:auto;min-height:0;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;touch-action:pan-y;padding-bottom:calc(28px + env(safe-area-inset-bottom))}
 /* ===== свои напоминания до задачи ===== */
 .nt-dim{opacity:.5;pointer-events:none}
 .off-chips{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 12px}
@@ -1393,14 +1396,18 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
         }
 
         // Рейтинг считает сервер раз в сутки; окно со званием показываем при первом заходе за день
+        let eloShownMem = { day: null, rating: null };
         async function loadElo() {
             try {
                 const e = (await api('/api/elo')).elo;
                 $('eloNum').textContent = e.rating;
                 let seen = null, shownDay = null;
                 try { seen = parseInt(localStorage.getItem('myday_elo_seen'), 10); shownDay = localStorage.getItem('myday_elo_day'); } catch (x) {}
+                // если localStorage недоступен (Telegram), помним день в памяти — иначе окно вылезало после каждого нажатия
+                if (eloShownMem.day === todayStr()) shownDay = eloShownMem.day;
                 if (currentTab === 'home' && shownDay !== todayStr()) {
-                    const from = Number.isFinite(seen) ? seen : e.prev_rating;
+                    const from = Number.isFinite(seen) ? seen : (eloShownMem.rating ?? e.prev_rating);
+                    eloShownMem = { day: todayStr(), rating: e.rating };
                     try { localStorage.setItem('myday_elo_day', todayStr()); localStorage.setItem('myday_elo_seen', String(e.rating)); } catch (x) {}
                     showEloOverlay(from, e.rating);
                 }
