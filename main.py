@@ -2800,6 +2800,11 @@ NOTIFY_MIGRATIONS = [
         "done INTEGER NOT NULL, zone TEXT NOT NULL, delta INTEGER NOT NULL, rating INTEGER NOT NULL, "
         "PRIMARY KEY (user_id, day))",
     ]),
+    # Бонусы Elo: сколько привычек отмечено и сколько жизненных целей выполнено в день (для разбивки; в delta они уже учтены).
+    ("elo_009_bonuses", [
+        ("ADD_COLUMN", "elo_log", "habits", "INTEGER NOT NULL DEFAULT 0"),
+        ("ADD_COLUMN", "elo_log", "goals", "INTEGER NOT NULL DEFAULT 0"),
+    ]),
 ]
 
 
@@ -3743,6 +3748,19 @@ async def reminder_loop():
 ELO_START = 1000
 ELO_DELTAS = {"green": 15, "yellow": 5, "red": -10, "free": 0}
 ELO_FREE_PER_WEEK = 2
+ELO_HABIT_BONUS = 10  # за каждую привычку, отмеченную в этот день
+ELO_GOAL_BONUS = 20  # за каждую жизненную цель, выполненную в этот день
+
+
+async def elo_bonus(db, uid: int, day: str) -> tuple[int, int]:
+    """(отмечено привычек, выполнено целей) за день. Привычки — по журналу habit_logs, цели — по дате выполнения."""
+    async with db.execute("SELECT COUNT(*) FROM habit_logs l JOIN habits h ON h.id = l.habit_id "
+                          "WHERE h.user_id = ? AND l.day = ?", (uid, day)) as cur:
+        habits = (await cur.fetchone())[0]
+    async with db.execute("SELECT COUNT(*) FROM life_goals WHERE user_id = ? AND status = 'done' AND completed_on = ?",
+                          (uid, day)) as cur:
+        goals = (await cur.fetchone())[0]
+    return habits, goals
 
 
 def elo_zone(planned: int, done: int) -> str:
@@ -3819,9 +3837,12 @@ async def elo_sync(db, u: dict, now: datetime | None = None):
         if k not in settled:
             planned, done = await elo_planned_done(db, uid, k)
             zone_, delta = await elo_day_result(db, uid, k, planned, done)
+            n_habits, n_goals = await elo_bonus(db, uid, k)
+            delta += n_habits * ELO_HABIT_BONUS + n_goals * ELO_GOAL_BONUS
             rating = await elo_rating(db, uid) + delta
-            await db.execute("INSERT OR IGNORE INTO elo_log (user_id, day, planned, done, zone, delta, rating) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                             (uid, k, planned, done, zone_, delta, rating))
+            await db.execute("INSERT OR IGNORE INTO elo_log (user_id, day, planned, done, zone, delta, rating, habits, goals) "
+                             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             (uid, k, planned, done, zone_, delta, rating, n_habits, n_goals))
         d += timedelta(days=1)
     await db.commit()
 
@@ -3832,12 +3853,14 @@ async def elo_view(db, u: dict) -> dict:
     today = utc_to_local(utcnow(), u["zone"]).date().isoformat()
     planned, done = await elo_planned_done(db, uid, today)
     zone_, delta = await elo_day_result(db, uid, today, planned, done)
+    n_habits, n_goals = await elo_bonus(db, uid, today)
+    delta += n_habits * ELO_HABIT_BONUS + n_goals * ELO_GOAL_BONUS
     # рейтинг до последнего закрытого дня — от него окно звания на главной начинает анимацию
     async with db.execute("SELECT rating FROM elo_log WHERE user_id = ? ORDER BY day DESC LIMIT 2", (uid,)) as cur:
         last = [r[0] for r in await cur.fetchall()]
     prev = last[1] if len(last) > 1 else ELO_START
     return {"rating": await elo_rating(db, uid), "prev_rating": prev, "today_delta": delta, "today_zone": zone_,
-            "today_planned": planned, "today_done": done}
+            "today_planned": planned, "today_done": done, "today_habits": n_habits, "today_goals": n_goals}
 
 
 # =====================================================================

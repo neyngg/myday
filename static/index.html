@@ -899,6 +899,7 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
     <!-- Elo -->
     <div id="tab-elo" class="tab-content">
         <div class="rep-top"><button class="link-btn" onclick="go('home')">‹ Назад</button></div>
+        <div id="eloBody"></div>
     </div>
 
     <div id="tab-notify" class="tab-content">
@@ -1182,6 +1183,7 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
             if (tabId === 'report') renderReport();
             if (tabId === 'goals') loadGoals();
             if (tabId === 'notify') loadNotify();
+            if (tabId === 'elo') renderEloTab();
             if (tabId === 'focus') {
                 syncCalendarToToday();
                 renderCalendar();
@@ -1394,6 +1396,39 @@ button, .round-btn, .glass-btn, .ghost-btn, .btn-priority, .cb, .hc, .tab-btn, .
                 }
             } catch (err) { /* плашка остаётся с прежним значением */ }
         }
+
+        // Вкладка Elo: рейтинг, что набегает сегодня и правила начисления
+        async function renderEloTab() {
+            const box = $('eloBody');
+            box.innerHTML = '<div class="empty-hint">Загрузка…</div>';
+            try {
+                const e = (await api('/api/elo')).elo;
+                const sgn = n => (n > 0 ? '+' : '') + n;
+                const ZONES = { green: 'Зелёная зона', yellow: 'Жёлтая зона', red: 'Красная зона', free: 'Выходной' };
+                const h = e.today_habits || 0, g = e.today_goals || 0;
+                const taskPts = e.today_delta - h * 10 - g * 20;
+                const row = (t, sub, pts) => `<div class="nt-row"><div><div class="nt-t">${t}</div><div class="nt-s">${sub}</div></div><b>${sgn(pts)}</b></div>`;
+                box.innerHTML = `
+                    <div class="nt-sec">Рейтинг</div>
+                    <div class="glass-panel"><div class="nt-row"><div><div class="nt-t">${eloRankName(e.rating)}</div><div class="nt-s">Закрытые дни, без учёта сегодняшнего</div></div><b style="font-size:26px">${e.rating}</b></div></div>
+                    <div class="nt-sec">Сегодня набегает: ${sgn(e.today_delta)}</div>
+                    <div class="glass-panel">
+                        ${row('Задачи', `${ZONES[e.today_zone] || ''} · выполнено ${e.today_done} из ${e.today_planned}`, taskPts)}
+                        ${row('Привычки', `Отмечено: ${h} × 10`, h * 10)}
+                        ${row('Цели', `Выполнено: ${g} × 20`, g * 20)}
+                    </div>
+                    <div class="nt-sec">Как начисляется</div>
+                    <div class="glass-panel">
+                        <div class="nt-row"><div><div class="nt-t">План дня</div><div class="nt-s">80–100% — +15, 40–79% — +5, 0–39% — −10</div></div></div>
+                        <div class="nt-row"><div><div class="nt-t">Каждая привычка</div><div class="nt-s">+10 за отметку в этот день</div></div></div>
+                        <div class="nt-row"><div><div class="nt-t">Каждая выполненная цель</div><div class="nt-s">+20 в день, когда цель закрыта</div></div></div>
+                        <div class="nt-row"><div><div class="nt-t">Итог дня</div><div class="nt-s">Рейтинг пересчитывается после полуночи</div></div></div>
+                    </div>`;
+            } catch (err) {
+                box.innerHTML = `<div class="empty-hint">${err instanceof ApiError && err.status ? err.message : 'Не удалось загрузить рейтинг'}</div>`;
+            }
+        }
+        const eloRankName = r => ELO_RANKS[eloRankIdx(r)].name;
 
         // Отчёт за 7 дней: данные из /api/stats (история хранится в daily.db на вашем компьютере)
         async function renderActivity() {
